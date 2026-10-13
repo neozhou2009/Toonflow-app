@@ -172,6 +172,24 @@ const ids = f => f.getNodes.value.map(n => n.id);
   ok("groupCollapse.ts 的 planExpand 向上遍历祖先链", /while \(ancestorId/.test(mod));
   ok("groupCollapsed.ts 展开时尊重内层手动折叠态", /isCollapsedHeight\(live\)\) continue/.test(mod));
   ok("groupCollapse.ts 为被连带隐藏的内层组补记高度", /rememberExpandedHeight\(live\)/.test(mod));
+
+  // 回归（COLLAPSED_HEIGHT is not defined）：组件用到的标识符必须在 import 列表里。
+  //   编译产物才会真炸——vite 对 script setup 的单文件转译不报这种错，只有运行时报。
+  const vueImports = new Set();
+  for (const m of src.matchAll(/import\s*(?:type\s*)?\{([^}]+)\} from "[^"]+"/g)) {
+    for (const name of m[1].split(',')) {
+      const n = name.trim().replace(/^type /, '').split(' as ')[0].trim();
+      if (n) vueImports.add(n);
+    }
+  }
+  const declaredTop = new Set([...src.matchAll(/^(?:async\s+)?function\s+(\w+)|^(?:const|let|var)\s+(\w+)/gm)].flatMap(m => [m[1], m[2]]).filter(Boolean));
+  const usedUpper = new Set();
+  const codeOnly = src.replace(/"[^"\n]*"|'[^'\n]*'|`[^`]*`|\/\/.*|\/\*[\s\S]*?\*\//g, '');
+  for (const m of codeOnly.matchAll(/\b[A-Z][A-Z0-9_]{2,}\b/g)) usedUpper.add(m[0]);
+  const missingUpper = [...usedUpper].filter(u => !vueImports.has(u) && !declaredTop.has(u)
+    && !['HTMLInputElement','String','Number','Object'].includes(u));
+  ok("回归：组件内大写常量/函数全部已导入或已声明（COLLAPSED_HEIGHT is not defined）",
+    missingUpper.length === 0, missingUpper.join(',') || '全齐');
 }
 
 /* ================================================================== */

@@ -55,7 +55,7 @@ import { ElMessage } from "element-plus";
 import { IconChevronDown, IconChevronRight } from "@tabler/icons-vue";
 import { summarize, isDefaultLabel, displayLabel as displayLabelOf, type SummaryNode } from "./groupSummary";
 import {
-  collapsedStyle, collectDescendants, planExpand,
+  COLLAPSED_HEIGHT, collapsedStyle, collectDescendants, planExpand,
   rememberExpandedHeight, isCollapsedHeight, fitChainToVisible,
   type CollapseNode,
 } from "./groupCollapse";
@@ -218,6 +218,7 @@ async function collapseGroup() {
   }
   const collapsedHeightPx = COLLAPSED_HEIGHT;
   flow.updateNode(props.id, { hidden: false, style: collapsedStyle(node as CollapseNode), expandParent: false });
+
   // ACT: style 压了但 dimensions 还是旧值（如 300px），父组贴合时会按旧值算，
   //      框缩不下来——用户第二次反馈的正是这个。折叠态高度是确定值 COLLAPSED_HEIGHT，
   //      直接同步 dimensions，不等 DOM。
