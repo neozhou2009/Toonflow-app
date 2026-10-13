@@ -53,6 +53,7 @@ import { computed, inject, nextTick, onBeforeUnmount, ref, shallowRef, watch } f
 import { useVueFlow, type GraphNode, type NodeProps } from "@vue-flow/core";
 import { ElMessage } from "element-plus";
 import { IconChevronDown, IconChevronRight } from "@tabler/icons-vue";
+import { translate } from "@toonflow/i18n/vue";
 import { summarize, isDefaultLabel, displayLabel as displayLabelOf, type SummaryNode } from "./groupSummary";
 import {
   COLLAPSED_HEIGHT, collapsedStyle, collectDescendants, planExpand,
@@ -93,7 +94,9 @@ async function editLabel() {
   if (props.readOnly) return;
   // ACT: 拿摘要当预填起点，用户改几个字比从零起名容易得多。
   const named = (data.value.label ?? "").trim();
-  labelDraft.value = isDefaultLabel(named) ? (summary.value || "分组") : named;
+  // ACT: 未命名（含被 i18n 显示为 Group 等译名的）预填摘要当起点；
+  //      用户一旦命名就预填原字。
+  labelDraft.value = isDefaultLabel(named, translate) ? (summary.value || "分组") : named;
   editingLabel.value = true;
   await nextTick();
   labelInput.value?.select();
@@ -295,7 +298,8 @@ const summary = computed(() =>
  *      是因为撤销快照只保留 data.label，自存标志会在撤销后失效。
  */
 const displayLabel = computed(() => displayLabelOf(data.label, collapsed.value,
-  flow.getNodes.value.filter(node => node.parentNode === props.id) as SummaryNode[]));
+  flow.getNodes.value.filter(node => node.parentNode === props.id) as SummaryNode[],
+  translate));
 
 watch(
   () => props.readOnly ? [] : flow.getNodes.value.filter(node => node.parentNode === props.id),

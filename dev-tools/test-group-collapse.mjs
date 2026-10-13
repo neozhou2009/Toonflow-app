@@ -311,6 +311,15 @@ ok("展开态无名字 → 「分组」", displayLabel("", false, kids) === "分
 ok("空分组（未命名）折叠 → 退回「分组」而不是空标题", displayLabel("", true, []) === "分组");
 ok("空分组（已命名）折叠 → 只显名字，不出现空尾巴", displayLabel("渡口", true, []) === "渡口");
 ok("isDefaultLabel 正确识别默认与命名", isDefaultLabel("分组") && isDefaultLabel("") && isDefaultLabel(undefined) && !isDefaultLabel("渡口"));
+// i18n 默认名在英文界面显示为 Group——必须同样视为未命名（用户截图的 Group）
+const enT = (s) => s === "分组" ? "Group" : s;
+ok("i18n：Group（英文译名）也算未命名", isDefaultLabel("Group", enT));
+ok("i18n：折叠时 Group 也给纯摘要（传入 translate）",
+  displayLabel("Group", true, kids, enT) === summarize(kids),
+  displayLabel("Group", true, kids, enT));
+ok("i18n：自定义名折叠时名字在最前", displayLabel(" harbor night ", true, kids) === `harbor night · ${summarize(kids)}`);
+ok("i18n：Group 被改名后预填原字（不预填摘要）",
+  (() => { return !isDefaultLabel("渡口", enT); })());
 
 // G) 摘要必须实时（不缓存）
 const before = summarize(kids);

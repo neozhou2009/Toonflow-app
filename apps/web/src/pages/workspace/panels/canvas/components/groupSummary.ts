@@ -80,10 +80,21 @@ export function summarize(children: SummaryNode[]): string {
   return [excerptOf(children), countTypes(children)].filter(Boolean).join(" · ");
 }
 
-/** 标签是否还是默认值（没被用户命名过）。 */
-export function isDefaultLabel(label: string | undefined): boolean {
+/** 标签是否还是默认值（没被用户命名过）。
+ * ACT: 建组写入的是中文「分组」，而界面按 i18n 显示为 Group/группа/…。
+ *      判定"是否用户命名"必须把显示层的翻译也当作默认名——否则英文界面下
+ *      用户没命名的组被误判为已命名（折叠时不给摘要、预填给错起点）。
+ *      translate 由调用方注入；纯测试不传也能跑（只认中文原值）。
+ */
+export function isDefaultLabel(label: string | undefined, translate?: (s: string) => string): boolean {
   const named = (label ?? "").trim();
-  return !named || named === DEFAULT_GROUP_LABEL;
+  if (!named) return true;
+  if (named === DEFAULT_GROUP_LABEL) return true;
+  try {
+    return !!translate && translate(DEFAULT_GROUP_LABEL) === named;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -94,10 +105,15 @@ export function isDefaultLabel(label: string | undefined): boolean {
  *      · 用户命名过 → 「名字 · 摘要」（概要紧跟其后，名字始终在最前）；
  *      · 空分组 → 原名退回「分组」，不拼接空摘要。
  */
-export function displayLabel(label: string | undefined, collapsed: boolean, children: SummaryNode[]): string {
+export function displayLabel(
+  label: string | undefined,
+  collapsed: boolean,
+  children: SummaryNode[],
+  translate?: (s: string) => string,
+): string {
   const named = (label ?? "").trim();
   if (!collapsed) return named || DEFAULT_GROUP_LABEL;
   const summary = summarize(children);
   if (!summary) return named || DEFAULT_GROUP_LABEL;
-  return isDefaultLabel(named) ? summary : `${named} · ${summary}`;
+  return isDefaultLabel(named, translate) ? summary : `${named} · ${summary}`;
 }
