@@ -9,6 +9,11 @@
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+// 直接 import 线上模块：折叠/展开的计划、后代收集、摘要，全链路测真代码
+import {
+  COLLAPSED_HEIGHT, collectDescendants, planExpand, collapsedStyle, restoredStyle,
+  rememberExpandedHeight, isCollapsedHeight, styleOf, expandedHeightOf,
+} from "../apps/web/src/pages/workspace/panels/canvas/components/groupCollapse.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const results = [];
@@ -33,72 +38,27 @@ class FakeFlow {
   }
 }
 
-// 与 groupNode.vue 中一致的工具函数
-const COLLAPSED_HEIGHT = 28;
-const nodeStyle = n => (typeof n.style === "object" && n.style ? n.style : {});
-
-function childrenMap(flow) {
-  const map = new Map();
-  for (const node of flow.getNodes.value) {
-    if (!node.parentNode) continue;
-    const list = map.get(node.parentNode);
-    if (list) list.push(node); else map.set(node.parentNode, [node]);
-  }
-  return map;
-}
-
-function getDescendantIds(flow, rootId) {
-  const map = childrenMap(flow);
-  const out = [];
-  const queue = [...(map.get(rootId) ?? [])];
-  const seen = new Set([rootId]);
-  while (queue.length) {
-    const node = queue.shift();
-    if (seen.has(node.id)) continue;
-    seen.add(node.id);
-    out.push(node.id);
-    queue.push(...(map.get(node.id) ?? []));
-  }
-  return out;
-}
-
-const isNodeCollapsed = n => {
-  if (!n) return false;
-  const h = Number.parseFloat(String(nodeStyle(n).height ?? ""));
-  return Number.isFinite(h) && h <= COLLAPSED_HEIGHT;
-};
-
+// 下面这两个薄封装只是把真实模块的计划落到 FakeFlow 上。
+// 逻辑全在 groupCollapse.ts 里——测这里等于测线上代码，不再是复刻品。
 function collapseGroup(flow, rootId) {
   const node = flow.findNode(rootId);
   if (!node) return;
-  const style = nodeStyle(node);
-  const h = Number.parseFloat(String(style.height ?? ""));
-  if (Number.isFinite(h) && h > COLLAPSED_HEIGHT) node.data.expandedHeight = h;
-  else if (!node.data.expandedHeight && node.dimensions?.height > COLLAPSED_HEIGHT) node.data.expandedHeight = node.dimensions.height;
-  for (const id of getDescendantIds(flow, rootId)) flow.updateNode(id, { hidden: true, expandParent: false });
-  flow.updateNode(rootId, { hidden: false, style: { ...style, height: `${COLLAPSED_HEIGHT}px` }, expandParent: false });
+  node.data.expandedHeight = rememberExpandedHeight(node);
+  for (const id of collectDescendants(flow.getNodes.value, rootId)) flow.updateNode(id, { hidden: true, expandParent: false });
+  flow.updateNode(rootId, { hidden: false, style: collapsedStyle(node), expandParent: false });
 }
 
 function expandGroup(flow, rootId) {
-  const node = flow.findNode(rootId);
-  if (!node) return;
-  const style = nodeStyle(node);
-  const expanded = Number(node.data.expandedHeight);
-  const restore = Number.isFinite(expanded) && expanded > COLLAPSED_HEIGHT ? `${expanded}px` : undefined;
-  const map = childrenMap(flow);
-  const queue = [...(map.get(rootId) ?? [])];
-  while (queue.length) {
-    const child = queue.shift();
-    flow.updateNode(child.id, { hidden: false, expandParent: false });
-    if (isNodeCollapsed(child)) continue;      // 保留内层手动收起的分组
-    queue.push(...(map.get(child.id) ?? []));
-  }
-  flow.updateNode(rootId, {
-    hidden: false,
-    style: restore ? { ...style, height: restore } : Object.fromEntries(Object.entries(style).filter(([k]) => k !== "height")),
-    expandParent: false,
-  });
+  const plan = planExpand(flow.getNodes.value, rootId);
+  for (const id of plan.unhide) flow.updateNode(id, { hidden: false, expandParent: false });
+  for (const [id, style] of plan.restyle) flow.updateNode(id, { style, expandParent: false });
 }
+
+// 兼容旧用例里的写法
+const expandGroupWithAncestors = expandGroup;
+const nodeStyle = styleOf;
+const getDescendantIds = (flow, rootId) => collectDescendants(flow.getNodes.value, rootId);
+const isNodeCollapsed = isCollapsedHeight;
 
 /* ------------------------------------------------------------------ 用例树 */
 // 复刻用户截图里的结构：外层分组 G 内含 分组1(n1) 和内层分组 G2，G2 内有 分组2(n2)、分组3(n3)
@@ -198,11 +158,19 @@ const ids = f => f.getNodes.value.map(n => n.id);
 // 8) 源码一致性：确认 groupNode.vue 用的确实是递归版而不是只取直接子节点
 {
   const src = readFileSync(resolve(ROOT, "apps/web/src/pages/workspace/panels/canvas/components/groupNode.vue"), "utf8");
-  ok("源码含 getDescendantIds（递归后代）", src.includes("function getDescendantIds"));
-  ok("源码的 collapseGroup 调用的是 getDescendantIds", /for \(const id of getDescendantIds\(props\.id\)\)/.test(src));
-  ok("源码已不再有只取直接子节点的 getChildIds", !src.includes("function getChildIds"));
-  ok("源码的 expandGroup 保留了内层折叠态（isNodeCollapsed 短路）",
-    /if \(isNodeCollapsed\(child\)\) continue;/.test(src));
+  // ACT: 折叠/展开逻辑已抽到 groupCollapse.ts，这里断言"组件不再自己实现一遍"。
+  ok("组件不再本地重复实现 collectDescendants", !src.includes("function collectDescendants"));
+  ok("组件不再本地重复实现 getDescendantIds", !src.includes("function getDescendantIds"));
+  ok("组件的 collapseGroup 调用 collectDescendants（递归后代）", /collectDescendants\(/.test(src));
+  ok("组件的 expandGroup 调用 planExpand（含祖先传播）", /planExpand\(/.test(src));
+  ok("组件从 groupCollapse 取折叠态判定", /isCollapsedHeight\(/.test(src));
+
+  // 被抽出到的模块自身：必须有递归 + 祖先传播 + 尊重内层折叠态
+  const mod = readFileSync(resolve(ROOT, "apps/web/src/pages/workspace/panels/canvas/components/groupCollapse.ts"), "utf8");
+  ok("groupCollapse.ts 含 collectDescendants（递归后代）", /export function collectDescendants/.test(mod));
+  ok("groupCollapse.ts 的 planExpand 向上遍历祖先链", /while \(ancestorId/.test(mod));
+  ok("groupCollapsed.ts 展开时尊重内层手动折叠态", /isCollapsedHeight\(live\)\) continue/.test(mod));
+  ok("groupCollapse.ts 为被连带隐藏的内层组补记高度", /rememberExpandedHeight\(live\)/.test(mod));
 }
 
 /* ================================================================== */
@@ -289,6 +257,65 @@ ok("增删节点后摘要实时变化，不存在过期摘要", before !== after
     /toggleCollapse[\s\S]{0,400}nodesSelectionActive\.value\s*=\s*false/.test(src));
   ok("折叠按钮事件被完全截断（pointerdown/mousedown/click/dblclick 全 stop）",
     (src.match(/@(?:pointerdown|mousedown|click|dblclick)\.stop/g) || []).length >= 8);
+}
+
+// 9) 回归：内层展开时父组必须跟着展开（用户截图：子组展开了父组还是空的）
+{
+  const f = new FakeFlow([
+    { id: "P", type: "canvasGroup", style: { height: "400px" }, data: { label: "分组" } },
+    { id: "C", type: "canvasGroup", parentNode: "P", style: { height: "300px" }, data: { label: "分组" } },
+    { id: "n1", type: "textNode", parentNode: "P", data: { label: "文本" } },
+    { id: "n2", type: "textNode", parentNode: "C", data: { label: "文本" } },
+  ]);
+  // 外层收起 → 内层也进了 hidden
+  collapseGroup(f, "P");
+  ok("前置：外层折叠后内层 C 与 n2 均隐藏", f.findNode("C").hidden && f.findNode("n2").hidden);
+  // 现在只点内层的展开（模拟用户操作：内层按钮在折叠态仍可见）
+  expandGroupWithAncestors(f, "C");
+  ok("回归：内层展开后自己的子节点可见", f.findNode("n2").hidden === false);
+  ok("回归：内层展开后父组 P 也跟着展开（不再只剩空框）", f.findNode("P").hidden === false);
+  ok("回归：父组 P 的高度被还原为 400px", nodeStyle(f.findNode("P")).height === "400px", nodeStyle(f.findNode("P")).height);
+  ok("回归：父组里兄弟节点 n1 也恢复可见", f.findNode("n1").hidden === false);
+  ok("回归：内层 C 自身高度恢复为 300px", nodeStyle(f.findNode("C")).height === "300px");
+}
+
+// 10) 回归：孙节点在深层折叠态下，逐层展开要能一层层打开
+{
+  const f = new FakeFlow([
+    { id: "A", type: "canvasGroup", style: { height: "600px" }, data: {} },
+    { id: "B", type: "canvasGroup", parentNode: "A", style: { height: "300px" }, data: {} },
+    { id: "leaf", type: "textNode", parentNode: "B", data: {} },
+  ]);
+  collapseGroup(f, "A");
+  collapseGroup(f, "B");
+  ok("前置：A、B 均折叠后 leaf 隐藏", f.findNode("leaf").hidden && f.findNode("A").hidden === false);
+  expandGroupWithAncestors(f, "B");
+  ok("回归：展开 B 时祖先 A 一并展开", f.findNode("A").hidden === false && nodeStyle(f.findNode("A")).height === "600px");
+  ok("回归：展开 B 后 leaf 可见", f.findNode("leaf").hidden === false);
+}
+
+// 11) 回归：折叠态标题不可能是空白
+{
+  const cases = [
+    { label: undefined, type: "canvasGroup" },
+    { label: "", type: "canvasGroup" },
+    { label: "分组", type: "canvasGroup" },
+    { label: "渡口", type: "canvasGroup" },
+  ];
+  for (const c of cases) {
+    const out = displayLabel(c.label, true, []);
+    ok(`回归：折叠态标题非空白（label=${JSON.stringify(c.label)}）`,
+      typeof out === "string" && out.trim().length > 0, `得到 "${out}"`);
+  }
+  // 有内容时必须出摘要，且摘要非空白
+  const withKids = displayLabel("分组", true, [
+    { id: "i", type: "imageNode", data: { label: "图片" } },
+  ]);
+  ok("回归：未命名且有子节点时折叠态给摘要（如「图片×1」）",
+    withKids.trim().length > 0 && withKids !== "分组", withKids);
+  // 单分组场景：组里只有一个分组（用户说的"只有一个分组折叠时"）
+  const single = displayLabel(undefined, true, [{ id: "g", type: "canvasGroup", data: { label: "分组" } }]);
+  ok("回归：单分组折叠时也有标题（分组×1）", single.includes("分组×1"), single);
 }
 
 console.log(results.join("\n"));

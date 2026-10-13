@@ -54,6 +54,11 @@ import { useVueFlow, type GraphNode, type NodeProps } from "@vue-flow/core";
 import { ElMessage } from "element-plus";
 import { IconChevronDown, IconChevronRight } from "@tabler/icons-vue";
 import { summarize, isDefaultLabel, displayLabel as displayLabelOf, type SummaryNode } from "./groupSummary";
+import {
+  collapsedStyle, collectDescendants, planExpand,
+  rememberExpandedHeight, isCollapsedHeight,
+  type CollapseNode,
+} from "./groupCollapse";
 
 const props = withDefaults(defineProps<NodeProps & { readOnly?: boolean }>(), { readOnly: false });
 const flow = useVueFlow();
@@ -61,8 +66,7 @@ const batchHistory = inject<((action: () => Promise<void>) => Promise<void>) | u
 const editingLabel = ref(false);
 const labelDraft = ref("");
 const labelInput = ref<HTMLInputElement>();
-/** 折叠中的分组高度：刚好容纳边框与留白，让压缩后的框仍可被点击选中。 */
-const COLLAPSED_HEIGHT = 28;
+
 const resizeCorners = [
   { name: "topLeft", label: "左上角", x: -1, y: -1 },
   { name: "topRight", label: "右上角", x: 1, y: -1 },
@@ -179,47 +183,11 @@ watch(() => props.readOnly, readOnly => {
 const collapsed = computed(() => {
   const node = flow.findNode(props.id);
   if (!node) return false;
-  const height = Number.parseFloat(String(nodeStyle(node).height ?? ""));
-  return Number.isFinite(height) && height <= COLLAPSED_HEIGHT;
+  return isCollapsedHeight(node as CollapseNode);
 });
 
 function nodeStyle(node: GraphNode): Record<string, string> {
   return typeof node.style === "object" && node.style ? node.style : {};
-}
-
-/** parentNode → 子节点列表。ACT: 建一次表复用，嵌套分组下反复 getNodes 会重复遍历。 */
-function childrenMap(): Map<string, GraphNode[]> {
-  const map = new Map<string, GraphNode[]>();
-  for (const node of flow.getNodes.value) {
-    if (!node.parentNode) continue;
-    const list = map.get(node.parentNode);
-    if (list) list.push(node);
-    else map.set(node.parentNode, [node]);
-  }
-  return map;
-}
-
-/** 后代节点 id（含嵌套分组内的），广度优先。ACT: visited 兜底，防数据异常成环死循环。 */
-function getDescendantIds(rootId: string): string[] {
-  const map = childrenMap();
-  const result: string[] = [];
-  const queue = [...(map.get(rootId) ?? [])];
-  const visited = new Set<string>([rootId]);
-  while (queue.length) {
-    const node = queue.shift()!;
-    if (visited.has(node.id)) continue;
-    visited.add(node.id);
-    result.push(node.id);
-    queue.push(...(map.get(node.id) ?? []));
-  }
-  return result;
-}
-
-/** 分组是否处于折叠态（高度被压成标题条）。 */
-function isNodeCollapsed(node: GraphNode | undefined): boolean {
-  if (!node) return false;
-  const height = Number.parseFloat(String(nodeStyle(node).height ?? ""));
-  return Number.isFinite(height) && height <= COLLAPSED_HEIGHT;
 }
 
 function toggleCollapse() {
@@ -242,53 +210,26 @@ function toggleCollapse() {
 function collapseGroup() {
   const node = flow.findNode(props.id);
   if (!node) return;
-  const style = nodeStyle(node);
-  const height = Number.parseFloat(String(style.height ?? ""));
-  // ACT: 记住展开时的高度。建组时写过 style.height；没写过就量一次当前实际高度，
-  //      否则展开后会丢掉尺寸，节点会挤在框外。
-  if (Number.isFinite(height) && height > COLLAPSED_HEIGHT) props.data.expandedHeight = height;
-  else if (!props.data.expandedHeight && node.dimensions.height > COLLAPSED_HEIGHT) props.data.expandedHeight = node.dimensions.height;
-  // ACT: 整棵子树全隐藏，嵌套分组里的孙节点才不会漏在外面。
-  //      内层分组若本来是收起的，它的子节点已经隐藏，重复设置无副作用。
-  for (const id of getDescendantIds(props.id)) flow.updateNode(id, { hidden: true, expandParent: false });
-  flow.updateNode(props.id, { hidden: false, style: { ...style, height: `${COLLAPSED_HEIGHT}px` }, expandParent: false });
+  // ACT: 记住展开时的高度（建组时写过 style.height；没写过就退到实际量到的高度），
+  //      否则展开后丢掉尺寸，节点会挤在框外。
+  props.data.expandedHeight = rememberExpandedHeight(node);
+  // ACT: 整棵子树全隐藏——只取直接子节点会让「分组里的分组」的孙节点漏在外面。
+  for (const id of collectDescendants(flow.getNodes.value as CollapseNode[], props.id)) {
+    flow.updateNode(id, { hidden: true, expandParent: false });
+  }
+  flow.updateNode(props.id, { hidden: false, style: collapsedStyle(node as CollapseNode), expandParent: false });
 }
 
 function expandGroup() {
   const node = flow.findNode(props.id);
   if (!node) return;
-  const style = nodeStyle(node);
-  const expanded = Number(props.data.expandedHeight);
-  const restore = Number.isFinite(expanded) && expanded > COLLAPSED_HEIGHT ? `${expanded}px` : undefined;
-  // ACT: 自顶向下展开；遇到自身处于折叠态的后代分组就止步，
-  //      保留用户手动收起的内层分组——否则外层一次展开会把它一起还原。
-  const map = childrenMap();
-  const queue = [...(map.get(props.id) ?? [])];
-  while (queue.length) {
-    const child = queue.shift()!;
-    flow.updateNode(child.id, { hidden: false, expandParent: false });
-    if (isNodeCollapsed(child)) continue;
-    queue.push(...(map.get(child.id) ?? []));
-  }
-  flow.updateNode(props.id, {
-    hidden: false,
-    // ACT: height 为 undefined 时清掉该键，而不是写成 "undefined"，否则 vue-flow 量不出尺寸。
-    style: restore ? { ...style, height: restore } : Object.fromEntries(Object.entries(style).filter(([key]) => key !== "height")),
-    expandParent: false,
-  });
+  // ACT: 计划在 groupCollapse.ts 里算好（纯函数，可直接单测）：
+  //      向上把被折叠的祖先一并展开、父框里其他子节点也显示，
+  //      向下铺开自己这一支但尊重用户手动收起的内层分组。
+  const plan = planExpand(flow.getNodes.value as CollapseNode[], props.id);
+  for (const id of plan.unhide) flow.updateNode(id, { hidden: false, expandParent: false });
+  for (const [id, style] of plan.restyle) flow.updateNode(id, { style, expandParent: false });
 }
-
-// ACT: 折叠中拖入新节点要跟着隐藏，否则会出现"分组收起但节点露在外面"。
-//      只依赖子节点 id 列表：依赖里带上 hidden 会被自己触发，形成无谓的重复遍历。
-watch(
-  () => flow.getNodes.value.filter(node => node.parentNode === props.id).map(node => node.id).join(","),
-  () => {
-    if (!collapsed.value) return;
-    for (const id of getDescendantIds(props.id)) {
-      if (!flow.findNode(id)?.hidden) flow.updateNode(id, { hidden: true, expandParent: false });
-    }
-  },
-);
 
 /* ------------------------------------------------------------------ */
 /* 折叠态内容摘要                                                       */
