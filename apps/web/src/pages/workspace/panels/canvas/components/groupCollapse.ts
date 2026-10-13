@@ -178,3 +178,69 @@ export function rememberExpandedHeight(node: CollapseNode & { dimensions?: { hei
   if (current === undefined) return node.data?.expandedHeight;
   return Math.max(current, node.data?.expandedHeight ?? 0);
 }
+
+export interface FitPlanStep {
+  groupId: string;
+  /** 组的新 position（父坐标）。 */
+  position: { x: number; y: number };
+  width: number;
+  height: number;
+  /** 随组平移的可见子节点：[(id, 相对位移)]。 */
+  shifts: { id: string; dx: number; dy: number }[];
+}
+
+/**
+ * 按「可见直系子节点」重新贴合一个组的边界，返回纯计划，由调用方落地。
+ *
+ * ACT: 上游 fitGroupBounds 不过滤 hidden 子节点——展开场景全部可见没问题，
+ *      但折叠场景子节点被隐藏后 dimensions 还是旧值，照它算父框永远缩不小
+ *      （用户报的"子分组折叠时父分组大小没有自适应缩小"）。所以这里
+ *      只统计 !hidden 的直系子节点，且跳过还没量出尺寸的。
+ *      布局公式与上游一致（-24/-40 内边距，右/下 +24 呼吸空间）。
+ */
+export function planFitVisible(nodes: CollapseNode[], groupId: string): FitPlanStep | undefined {
+  const group = nodes.find(node => node.id === groupId);
+  if (!group) return undefined;
+  // ACT: 只统计「可见且可量」（position + 尺寸齐全）的直系子节点；
+  //      没量完（如刚拖进来的新组、隐藏的旧组）直接跳过，而不是整个拒绝贴合——
+  //      否则内层组缺个 position 就让父框永远缩不小。
+  const children = nodes.filter(node => node.parentNode === groupId && !node.hidden
+    && node.position && node.dimensions?.width && node.dimensions?.height);
+  if (!children.length) return undefined;
+
+  const left = Math.min(...children.map(node => node.position.x)) - 24;
+  const top = Math.min(...children.map(node => node.position.y)) - 40;
+  const width = Math.max(...children.map(node => node.position.x + node.dimensions!.width)) - left + 24;
+  const height = Math.max(...children.map(node => node.position.y + node.dimensions!.height)) - top + 24;
+  const shifts = (left || top)
+    ? children.map(node => ({ id: node.id, dx: -left, dy: -top }))
+    : [];
+  const groupX = group.position?.x ?? 0;
+  const groupY = group.position?.y ?? 0;
+  return {
+    groupId,
+    position: { x: groupX + left, y: groupY + top },
+    width,
+    height,
+    shifts,
+  };
+}
+
+/**
+ * 组从内到外依次要贴合的祖先链（含它自己）。
+ * ACT: 先算出焦点组本身，再逐层向外。位置都是父坐标，层与层互不依赖，
+ *      但先有内层结果外层才量得准——调用方按返回顺序落地即可。
+ */
+export function fitChainToVisible(nodes: CollapseNode[], focusId: string): FitPlanStep[] {
+  const steps: FitPlanStep[] = [];
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  let current: string | undefined = focusId;
+  const visited = new Set<string>();
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    const step = planFitVisible(nodes, current);
+    if (step) steps.push(step);
+    current = byId.get(current)?.parentNode;
+  }
+  return steps;
+}

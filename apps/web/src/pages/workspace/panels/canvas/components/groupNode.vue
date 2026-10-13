@@ -56,7 +56,7 @@ import { IconChevronDown, IconChevronRight } from "@tabler/icons-vue";
 import { summarize, isDefaultLabel, displayLabel as displayLabelOf, type SummaryNode } from "./groupSummary";
 import {
   collapsedStyle, collectDescendants, planExpand,
-  rememberExpandedHeight, isCollapsedHeight,
+  rememberExpandedHeight, isCollapsedHeight, fitChainToVisible,
   type CollapseNode,
 } from "./groupCollapse";
 import { fitGroupBounds } from "../selectionNodes";
@@ -199,24 +199,45 @@ function toggleCollapse() {
     //      （Ctrl/Alt+G）会拿残选再打一个组，表现为"点一下折叠多出分组"。
     flow.nodesSelectionActive.value = false;
     if (collapsed.value) await expandGroup();
-    else collapseGroup();
+    else await collapseGroup();
   };
   void Promise.resolve(batchHistory ? batchHistory(action) : action()).catch(error => {
     ElMessage.error(error instanceof Error ? error.message : "折叠分组失败");
   });
 }
 
-function collapseGroup() {
+async function collapseGroup() {
   const node = flow.findNode(props.id);
   if (!node) return;
   // ACT: 记住展开时的高度（建组时写过 style.height；没写过就退到实际量到的高度），
   //      否则展开后丢掉尺寸，节点会挤在框外。
-  props.data.expandedHeight = rememberExpandedHeight(node);
+  props.data.expandedHeight = rememberExpandedHeight(node as CollapseNode);
   // ACT: 整棵子树全隐藏——只取直接子节点会让「分组里的分组」的孙节点漏在外面。
   for (const id of collectDescendants(flow.getNodes.value as CollapseNode[], props.id)) {
     flow.updateNode(id, { hidden: true, expandParent: false });
   }
   flow.updateNode(props.id, { hidden: false, style: collapsedStyle(node as CollapseNode), expandParent: false });
+  // ACT: 子树藏起来后父框必须收缩，否则下面留一大块空白。
+  //      不能用上游 fitGroupBounds——它不过滤 hidden 子节点，量到旧尺寸永远缩不小，
+  //      所以用只算可见子节点的 fitChainToVisible。等 DOM 量完再算，早了是旧值。
+  await nextTick();
+  for (const step of fitChainToVisible(flow.getNodes.value as CollapseNode[], props.id)) {
+    const target = flow.findNode(step.groupId);
+    if (!target) continue;
+    const parent = target.parentNode ? flow.findNode(target.parentNode) : undefined;
+    const px = parent?.computedPosition.x ?? 0;
+    const py = parent?.computedPosition.y ?? 0;
+    for (const shift of step.shifts) {
+      const child = flow.findNode(shift.id);
+      if (child) flow.updateNode(child.id, { position: { x: child.position.x + shift.dx, y: child.position.y + shift.dy } });
+    }
+    flow.updateNode(step.groupId, {
+      position: { x: step.position.x - px, y: step.position.y - py },
+      style: { ...(typeof target.style === "object" && target.style ? target.style : {}), width: `${step.width}px`, height: `${step.height}px` },
+    });
+    const live = flow.findNode(step.groupId);
+    if (live) live.dimensions = { width: step.width, height: step.height };
+  }
 }
 
 async function expandGroup() {

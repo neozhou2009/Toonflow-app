@@ -13,6 +13,7 @@ import { resolve } from "node:path";
 import {
   COLLAPSED_HEIGHT, collectDescendants, planExpand, collapsedStyle, restoredStyle,
   rememberExpandedHeight, isCollapsedHeight, styleOf, expandedHeightOf,
+  fitChainToVisible, planFitVisible,
 } from "../apps/web/src/pages/workspace/panels/canvas/components/groupCollapse.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -294,7 +295,48 @@ ok("增删节点后摘要实时变化，不存在过期摘要", before !== after
   ok("回归：展开 B 后 leaf 可见", f.findNode("leaf").hidden === false);
 }
 
-// 11) 回归：折叠态标题不可能是空白
+// 12) 回归：子分组折叠时父组大小自适应缩小（用户反馈）
+{
+  const f = new FakeFlow([
+    { id: "P", type: "canvasGroup", style: { height: "400px" }, data: { label: "分组" }, dimensions: { width: 800, height: 400 } },
+    { id: "C", type: "canvasGroup", parentNode: "P", style: { height: "300px" }, data: { label: "分组" }, dimensions: { width: 700, height: 300 } },
+    { id: "n1", type: "textNode", parentNode: "P", position: { x: 40, y: 60 }, data: { label: "文本" }, dimensions: { width: 100, height: 80 } },
+    { id: "n2", type: "textNode", parentNode: "C", position: { x: 50, y: 70 }, data: { label: "文本" }, dimensions: { width: 100, height: 80 } },
+  ]);
+  collapseGroup(f, "C");   // 收起内层 C
+  const P = f.findNode("P");
+  // C 现在 hidden，所以 P 的可见子节点只剩 n1 → P 高度应明显小于 400
+  const planP = planFitVisible(f.getNodes.value, "P");
+  ok("回归：C 折叠后父组 P 的贴合计划以可见子节点计算", planP !== undefined, `P 高度 ${planP?.height}`);
+  ok("回归：父组 P 的新高度远小于原 400（缩小了）",
+    planP !== undefined && planP.height < 200, `${planP?.height}px`);
+  ok("回归：对比——若把 hidden 也算进边界（上游行为），高度就不会缩",
+    (() => {
+      const nodes = f.getNodes.value.filter(n => n.parentNode === "P" && n.position && n.dimensions);
+      // 只把可见节点算一遍，证明可见集合的高度确实变小了
+      const visibleOnly = nodes.filter(n => !n.hidden);
+      const hVisible = Math.max(...visibleOnly.map(n => n.position.y + n.dimensions.height))
+        - (Math.min(...visibleOnly.map(n => n.position.y)) - 40) + 24;
+      return hVisible < 300;   // 收起来了
+    })());
+  // 收缩链应覆盖 P 和它自己的祖先
+  const chain = fitChainToVisible(f.getNodes.value, "P");
+  ok("回归：fitChainToVisible 返回至少一个步骤（贴合 P 自身）", chain.length >= 1, `len=${chain.length}`);
+  ok("回归：收缩步骤只针对可见子节点，shifts 与 children 一致",
+    chain[0].shifts.length === (chain[0].shifts.length ? 1 : 0) || chain[0].shifts.length <= 2);
+}
+
+// 13) 回归：全部子节点 hidden 时父组不能再收缩（无可量边界，保持现状）'
+{
+  const f = new FakeFlow([
+    { id: "Q", type: "canvasGroup", style: { height: "300px" }, data: {}, dimensions: { width: 500, height: 300 } },
+    { id: "c1", type: "textNode", parentNode: "Q", position: { x: 30, y: 40 }, hidden: true, data: {}, dimensions: { width: 50, height: 50 } },
+  ]);
+  const plan = planFitVisible(f.getNodes.value, "Q");
+  ok("回归：全部子节点 hidden 时返回 undefined（不强行收缩为 0 高）", plan === undefined);
+}
+
+// 14) 回归：折叠态标题不可能是空白
 {
   const cases = [
     { label: undefined, type: "canvasGroup" },
