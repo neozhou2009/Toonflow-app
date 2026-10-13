@@ -59,6 +59,7 @@ import {
   rememberExpandedHeight, isCollapsedHeight,
   type CollapseNode,
 } from "./groupCollapse";
+import { fitGroupBounds } from "../selectionNodes";
 
 const props = withDefaults(defineProps<NodeProps & { readOnly?: boolean }>(), { readOnly: false });
 const flow = useVueFlow();
@@ -192,15 +193,13 @@ function nodeStyle(node: GraphNode): Record<string, string> {
 
 function toggleCollapse() {
   if (props.readOnly) return;
-  const action = () => {
-    if (collapsed.value) expandGroup();
-    else collapseGroup();
-    // ACT: 折叠会把子节点设成 hidden，而 hidden 节点不再参与框选高亮。
-    //      若此时画布还停在"框选激活"状态，用户接着按成组快捷键（Ctrl/Alt+G）
-    //      会拿一份残留选区再打一个组，表现为"点一下折叠多出一个分组"。
-    //      这里主动收摊，把那个状态清掉。
+  const action = async () => {
+    // ACT: 清框选状态要在改 hidden 之前——hidden 节点不再参与框选高亮，
+    //      留着"框选激活"会把残留选区框进去，用户接着按成组快捷键
+    //      （Ctrl/Alt+G）会拿残选再打一个组，表现为"点一下折叠多出分组"。
     flow.nodesSelectionActive.value = false;
-    return Promise.resolve();
+    if (collapsed.value) await expandGroup();
+    else collapseGroup();
   };
   void Promise.resolve(batchHistory ? batchHistory(action) : action()).catch(error => {
     ElMessage.error(error instanceof Error ? error.message : "折叠分组失败");
@@ -220,7 +219,7 @@ function collapseGroup() {
   flow.updateNode(props.id, { hidden: false, style: collapsedStyle(node as CollapseNode), expandParent: false });
 }
 
-function expandGroup() {
+async function expandGroup() {
   const node = flow.findNode(props.id);
   if (!node) return;
   // ACT: 计划在 groupCollapse.ts 里算好（纯函数，可直接单测）：
@@ -229,6 +228,18 @@ function expandGroup() {
   const plan = planExpand(flow.getNodes.value as CollapseNode[], props.id);
   for (const id of plan.unhide) flow.updateNode(id, { hidden: false, expandParent: false });
   for (const [id, style] of plan.restyle) flow.updateNode(id, { style, expandParent: false });
+  // ACT: 展开一改动尺寸，父组框不会自己重新包住子内容——上游只在拖动松手时做贴合。
+  //      用户截图里的"外层框没圈住 分组3"正是缺了这一步。
+  //      这里复用上游同一套 fitGroupBounds（逐层重新计算边界与位置），把本组
+  //      以及挂在它之上的祖先组全部重新贴合。等 DOM 量完尺寸再算，早了量的是旧值。
+  await nextTick();
+  const affected = new Set<GraphNode>();
+  let chain: GraphNode | undefined = flow.findNode(props.id);
+  while (chain) {
+    affected.add(chain);
+    chain = chain.parentNode ? flow.findNode(chain.parentNode) : undefined;
+  }
+  fitGroupBounds(flow.getNodes.value, affected);
 }
 
 /* ------------------------------------------------------------------ */
