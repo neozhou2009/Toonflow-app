@@ -64,6 +64,8 @@ import { fitGroupBounds } from "../selectionNodes";
 const props = withDefaults(defineProps<NodeProps & { readOnly?: boolean }>(), { readOnly: false });
 const flow = useVueFlow();
 const batchHistory = inject<((action: () => Promise<void>) => Promise<void>) | undefined>("batchCanvasHistory", undefined);
+/** 节点数据。摘要与标题都要读 label；用 computed 保证 label 改动会联动。 */
+const data = computed(() => (props.node?.data ?? {}) as { label?: string });
 const editingLabel = ref(false);
 const labelDraft = ref("");
 const labelInput = ref<HTMLInputElement>();
@@ -90,7 +92,7 @@ const resize = shallowRef<{
 async function editLabel() {
   if (props.readOnly) return;
   // ACT: 拿摘要当预填起点，用户改几个字比从零起名容易得多。
-  const named = (props.data.label ?? "").trim();
+  const named = (data.value.label ?? "").trim();
   labelDraft.value = isDefaultLabel(named) ? (summary.value || "分组") : named;
   editingLabel.value = true;
   await nextTick();

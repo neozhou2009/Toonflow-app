@@ -173,6 +173,49 @@ const ids = f => f.getNodes.value.map(n => n.id);
   ok("groupCollapsed.ts 展开时尊重内层手动折叠态", /isCollapsedHeight\(live\)\) continue/.test(mod));
   ok("groupCollapse.ts 为被连带隐藏的内层组补记高度", /rememberExpandedHeight\(live\)/.test(mod));
 
+  // 回归（折叠后标题空白）：computed 里引用未定义标识符时 Vue 会静默把
+  //   返回值降级成 undefined，模板渲染成空且不弹窗——正是用户截图的现象。
+  //   检查组件 script 里每个标识符要么已导入/声明，要么是 JS/DOM 全局或局部变量。
+  const vueEdges = new Set();
+  for (const m of src.matchAll(/import\s*(?:type\s*)?\{([^}]+)\}\s*from\s*"[^"]+"/g)) {
+    for (const name of m[1].split(',')) {
+      const n = name.trim().replace(/^type /, '').split(/\s+as\s+/)[0].trim();
+      if (n) vueEdges.add(n);
+    }
+  }
+  const topl = new Set();
+  for (const m of src.matchAll(/^(?:async\s+)?function\s+(\w+)|^(?:const|let|var)\s+(\w+)/gm)) topl.add(m[1] || m[2]);
+  const propsNames = new Set(['props']);
+  // 从 defineProps<{...}> 解构字段一并视为可用
+  for (const m of src.matchAll(/defineProps<\{([^}]*)\}>/gs)) {
+    for (const f of m[1].matchAll(/(\w+)\??:/)) propsNames.add(f[1]);
+  }
+  // script 里出现过的局部变量（var/let/const/参数）、对象属性大的集合——保守白名单
+  const localNames = new Set([...src.matchAll(/\b(?:const|let|var)\s+(\w+)|function\s*\(?[\w{}, ]*\b(\w+)\b/g)].flatMap(m => [m[1], m[2]]).filter(Boolean));
+  const codeRaw = src.replace(/"[^"\n]*"|'[^'\n]*'|`[^`]*`|\/\/.*|\/\*[\s\S]*?\*\//g, '');
+  // 只查 computed(()=>...) 回调里引用的自由标识符：这才是静默空白的高发地
+  const csBlocks = [...src.matchAll(/computed\(\s*\(\s*\)\s*=>\s*(\{[\s\S]*?\}|[^)];*)\)/g)];
+  const jsGlobals = new Set(['String','Number','Boolean','Math','Object','Array','JSON','Date','Set','Map','undefined','true','false','null','encodeURIComponent','parseFloat','parseInt','const','let','var','if','return','as','typeof','new']);
+  const nodeFields = new Set(['data','label','type','id','position','dimensions','parentNode','hidden','style','selected','dragging','resizing','computedPosition','handleBounds','connectable']);
+  const badRefs = [];
+  for (const block of csBlocks) {
+    const body = block[1];
+    const refs = new Set();
+    // 提取点号访问前的根标识符（a.b.c → a）以及普通引用
+    for (const m of body.matchAll(/\b([a-zA-Z_$][\w$]*)\b/g)) {
+      const name = m[1];
+      if (jsGlobals.has(name) || nodeFields.has(name) || localNames.has(name) || vueEdges.has(name) || propsNames.has(name)) continue;
+      // 点号前面的可以省（都已被 nodeFields 或其它规则挡住）；查没有点前缀的独立引用
+      if (new RegExp(`\\.\\s*${name}\\b`).test(body)) continue;
+      refs.add(name);
+    }
+    if (refs.size) badRefs.push(...refs);
+  }
+  ok("回归：每个 computed 回调里的自由标识符都有定义（data 未定义会导致折叠后标题静默空白）",
+    badRefs.length === 0, [...new Set(badRefs)].join(',') || '全部可解析');
+  ok("回归：displayLabel computed 里不再引用裸的 data（应经 data.value 或 props.node）",
+    !/computed\(\s*\(\s*\)\s*=>\s*(?:displayLabelOf|\w+)\([^)]*\bdata\.label\b/.test(src) || /data\.value\.label|props\.node\?\.data/.test(src));
+
   // 回归（COLLAPSED_HEIGHT is not defined）：组件用到的标识符必须在 import 列表里。
   //   编译产物才会真炸——vite 对 script setup 的单文件转译不报这种错，只有运行时报。
   const vueImports = new Set();
