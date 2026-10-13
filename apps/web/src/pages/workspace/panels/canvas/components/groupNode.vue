@@ -56,7 +56,7 @@ import { IconChevronDown, IconChevronRight } from "@tabler/icons-vue";
 import { translate } from "@toonflow/i18n/vue";
 import { summarize, isDefaultLabel, displayLabel as displayLabelOf, type SummaryNode } from "./groupSummary";
 import {
-  COLLAPSED_HEIGHT, collapsedStyle, collectDescendants, planExpand,
+  COLLAPSED_HEIGHT, collapsedStyle, collectDescendants, collectExpandedGroupIds, planExpand,
   rememberExpandedHeight, isCollapsedHeight, fitChainToVisible,
   type CollapseNode,
 } from "./groupCollapse";
@@ -66,7 +66,7 @@ const props = withDefaults(defineProps<NodeProps & { readOnly?: boolean }>(), { 
 const flow = useVueFlow();
 const batchHistory = inject<((action: () => Promise<void>) => Promise<void>) | undefined>("batchCanvasHistory", undefined);
 /** 节点数据。摘要与标题都要读 label；用 computed 保证 label 改动会联动。 */
-const data = computed(() => (props.node?.data ?? {}) as { label?: string });
+const data = computed(() => (props.data ?? {}) as { label?: string });
 const editingLabel = ref(false);
 const labelDraft = ref("");
 const labelInput = ref<HTMLInputElement>();
@@ -268,18 +268,34 @@ async function expandGroup() {
   const plan = planExpand(flow.getNodes.value as CollapseNode[], props.id);
   for (const id of plan.unhide) flow.updateNode(id, { hidden: false, expandParent: false });
   for (const [id, style] of plan.restyle) flow.updateNode(id, { style, expandParent: false });
-  // ACT: 展开一改动尺寸，父组框不会自己重新包住子内容——上游只在拖动松手时做贴合。
-  //      用户截图里的"外层框没圈住 分组3"正是缺了这一步。
-  //      这里复用上游同一套 fitGroupBounds（逐层重新计算边界与位置），把本组
-  //      以及挂在它之上的祖先组全部重新贴合。等 DOM 量完尺寸再算，早了量的是旧值。
+  // ACT: 展开后不只重贴合本组和祖先；本组下面所有可见、未折叠的子分组也要
+  //      自底向上重算。否则子组旧 expandedHeight（例如节点已经排成一行，框仍保留
+  //      之前两行时的高度）会在外层展开后复活，出现用户截图里的空白高框。
+  //      collectExpandedGroupIds 会跳过手动折叠的子组，保留其折叠条高度。
   await nextTick();
+  const nodes = flow.getNodes.value;
   const affected = new Set<GraphNode>();
-  let chain: GraphNode | undefined = flow.findNode(props.id);
-  while (chain) {
-    affected.add(chain);
+  for (const id of collectExpandedGroupIds(nodes as CollapseNode[], props.id)) {
+    const group = flow.findNode(id);
+    if (group) affected.add(group);
+  }
+  const root = flow.findNode(props.id);
+  let chain: GraphNode | undefined = root?.parentNode ? flow.findNode(root.parentNode) : undefined;
+  const visited = new Set<string>([props.id]);
+  while (chain && !visited.has(chain.id)) {
+    visited.add(chain.id);
+    if (chain.type === "canvasGroup" && !isCollapsedHeight(chain as CollapseNode)) affected.add(chain);
     chain = chain.parentNode ? flow.findNode(chain.parentNode) : undefined;
   }
-  fitGroupBounds(flow.getNodes.value, affected);
+  fitGroupBounds(nodes, affected);
+  // ACT: fitGroupBounds 刚改过可见子组的实际高度；同步 expandedHeight，避免之后折叠/展开
+  //      又被历史缓存的更大高度覆盖回来。
+  for (const group of affected) {
+    const height = group.dimensions?.height;
+    if (typeof height === "number" && height > COLLAPSED_HEIGHT) {
+      flow.updateNodeData(group.id, { expandedHeight: height });
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -292,12 +308,12 @@ const summary = computed(() =>
   summarize(flow.getNodes.value.filter(node => node.parentNode === props.id) as SummaryNode[]));
 
 /**
- * 标题显示：展开态用原名；折叠态在「未命名」时改用内容摘要。
- * ACT: 「未命名」判定为 label 为空或等于建组默认值「分组」——用户一旦自己命名就信他的，
- *      那个名本身就是他自己写的摘要。用默认值判断而非自存 renamed 标志，
- *      是因为撤销快照只保留 data.label，自存标志会在撤销后失效。
+ * 标题显示：展开态用原名；折叠态保留原名并追加直接子内容摘要。
+ * ACT: 自定义名始终排在前面；未命名（含 i18n 默认名）时只显示摘要，
+ *      空分组则退回显示原名/默认名。用户截图要求“本来的分组名 + 分组×1”。
+ *      data 是 computed ref，在 script 中读取必须显式使用 .value；模板才会自动解包。
  */
-const displayLabel = computed(() => displayLabelOf(data.label, collapsed.value,
+const displayLabel = computed(() => displayLabelOf(data.value.label, collapsed.value,
   flow.getNodes.value.filter(node => node.parentNode === props.id) as SummaryNode[],
   translate));
 

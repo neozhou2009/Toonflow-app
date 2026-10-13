@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 // 直接 import 线上模块：折叠/展开的计划、后代收集、摘要，全链路测真代码
 import {
-  COLLAPSED_HEIGHT, collectDescendants, planExpand, collapsedStyle, restoredStyle,
+  COLLAPSED_HEIGHT, collectDescendants, collectExpandedGroupIds, planExpand, collapsedStyle, restoredStyle,
   rememberExpandedHeight, isCollapsedHeight, styleOf, expandedHeightOf,
   fitChainToVisible, planFitVisible,
 } from "../apps/web/src/pages/workspace/panels/canvas/components/groupCollapse.ts";
@@ -213,8 +213,12 @@ const ids = f => f.getNodes.value.map(n => n.id);
   }
   ok("回归：每个 computed 回调里的自由标识符都有定义（data 未定义会导致折叠后标题静默空白）",
     badRefs.length === 0, [...new Set(badRefs)].join(',') || '全部可解析');
-  ok("回归：displayLabel computed 里不再引用裸的 data（应经 data.value 或 props.node）",
-    !/computed\(\s*\(\s*\)\s*=>\s*(?:displayLabelOf|\w+)\([^)]*\bdata\.label\b/.test(src) || /data\.value\.label|props\.node\?\.data/.test(src));
+  ok("回归：分组标签从 NodeProps.data 读取（不是不存在的 props.node.data）",
+    src.includes("const data = computed(() => (props.data ?? {})") && !src.includes("props.node?.data"),
+    src.includes("props.node?.data") ? "错误地读了 props.node.data" : "使用 props.data");
+  ok("回归：摘要从 computed ref 的 data.value.label 读取原名（不能裸读 data.label）",
+    /displayLabelOf\(data\.value\.label/.test(src) && !/displayLabelOf\(data\.label/.test(src),
+    /displayLabelOf\(data\.label/.test(src) ? "脚本中漏了 .value，命中摘要默认分支" : "正确解包 computed ref");
 
   // 回归（COLLAPSED_HEIGHT is not defined）：组件用到的标识符必须在 import 列表里。
   //   编译产物才会真炸——vite 对 script setup 的单文件转译不报这种错，只有运行时报。
@@ -299,9 +303,17 @@ ok("超长文本被截断，标题栏不会撑爆",
 // F) 核心约束：绝不覆盖用户命名
 // 2026-10-13 需求变更：用户命名的组折叠时也要能看到内容信息。
 //   新语义 =「名字 · 摘要」。名字永不改动，摘要只是折叠时的附加展示。
-ok("用户命名「渡口对峙」折叠后显示「渡口对峙 · 摘要」（名字在前，摘要在后）",
+ok("用户命名「渡口对峙」折叠后显示「名字 · 摘要」（名字在前，摘要在后）",
   displayLabel("渡口对峙", true, kids) === `渡口对峙 · ${summarize(kids)}`,
   displayLabel("渡口对峙", true, kids));
+const nestedGroupChild = [{ id: "inner-group", type: "canvasGroup", data: { label: "内层" } }];
+ok("回归：外层自定义名后追加直接子分组计数「外层 · 分组×1」",
+  displayLabel("外层", true, nestedGroupChild) === "外层 · 分组×1",
+  displayLabel("外层", true, nestedGroupChild));
+const twoImageChildren = [{ id: "image-a", type: "imageNode" }, { id: "image-b", type: "imageNode" }];
+ok("回归：内层自定义名后追加直接图片计数「内层 · 图片×2」",
+  displayLabel("内层", true, twoImageChildren) === "内层 · 图片×2",
+  displayLabel("内层", true, twoImageChildren));
 ok("自定义名严格保留原样（连空格修剪后的内容不改）",
   displayLabel("分组1", true, kids).startsWith("分组1 · "));
 ok("默认标签 + 折叠 → 显示摘要", displayLabel("分组", true, kids) === summarize(kids));
@@ -423,7 +435,40 @@ ok("增删节点后摘要实时变化，不存在过期摘要", before !== after
     planBad !== undefined && planBad.height >= 300, `不缩=${planBad?.height}px vs 缩=${planP?.height}px`);
 }
 
-// 13) 回归：全部子节点 hidden 时父组不能再收缩（无可量边界，保持现状）
+// 13) 回归：展开外层分组时重贴合展开态后代分组，且尊重手动折叠的后代
+{
+  const componentSrc = readFileSync(resolve(ROOT, "apps/web/src/pages/workspace/panels/canvas/components/groupNode.vue"), "utf8");
+  ok("回归：expandGroup 会重贴合可见的未折叠后代分组（修复子组残留异常高度）",
+    /collectExpandedGroupIds\(/.test(componentSrc));
+
+  const nested = [
+    { id: "outer", type: "canvasGroup", style: { height: "866px" } },
+    { id: "first", type: "canvasGroup", parentNode: "outer", style: { height: "802px" } },
+    { id: "image-a", type: "imageNode", parentNode: "first" },
+    { id: "folded", type: "canvasGroup", parentNode: "first", style: { height: `${COLLAPSED_HEIGHT}px` } },
+    { id: "folded-child", type: "imageNode", parentNode: "folded", hidden: true },
+    { id: "second", type: "canvasGroup", parentNode: "outer", style: { height: "480px" } },
+  ];
+  const toRefit = collectExpandedGroupIds(nested, "outer");
+  ok("回归：外层展开会重算所有可见打开的子组（包括异常高的 first）",
+    ["outer", "first", "second"].every(id => toRefit.includes(id)), toRefit.join(","));
+  ok("回归：手动折叠的后代组和其隐藏子树不进入重贴合集合",
+    !toRefit.includes("folded") && !toRefit.includes("folded-child"), toRefit.join(","));
+  ok("回归：重贴合后的真实高度会写回 expandedHeight，防止旧高值再次复活",
+    /updateNodeData\(group\.id,\s*\{\s*expandedHeight:\s*height\s*\}\)/.test(componentSrc));
+
+  const staleHeightNodes = [
+    { id: "first", type: "canvasGroup", position: { x: 0, y: 0 }, dimensions: { width: 416, height: 802 }, style: { height: "802px" } },
+    { id: "image-a", type: "imageNode", parentNode: "first", position: { x: 24, y: 40 }, dimensions: { width: 180, height: 336 } },
+    { id: "image-b", type: "imageNode", parentNode: "first", position: { x: 194, y: 47 }, dimensions: { width: 222, height: 336 } },
+  ];
+  const refit = planFitVisible(staleHeightNodes, "first");
+  ok("回归：示例子组的 802px 旧高度会按同排图片内容收回至合理高度",
+    refit !== undefined && refit.height < 450 && refit.height < staleHeightNodes[0].dimensions.height,
+    `${refit?.height}px（原 ${staleHeightNodes[0].dimensions.height}px）`);
+}
+
+// 14) 回归：全部子节点 hidden 时父组不能再收缩（无可量边界，保持现状）
 {
   const f = new FakeFlow([
     { id: "Q", type: "canvasGroup", style: { height: "300px" }, data: {}, dimensions: { width: 500, height: 300 } },

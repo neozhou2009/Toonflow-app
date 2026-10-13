@@ -79,6 +79,39 @@ export function collectDescendants(nodes: CollapseNode[], rootId: string): strin
 }
 
 /**
+ * 展开一个外层分组后，要重新贴合的可见、展开态分组（含 root）。
+ * ACT: 外层折叠会隐藏整棵子树；再次展开只贴合 root 会让某个后代组保留
+ *      过期的 expandedHeight（例如子节点已排成一行，组框却仍是旧的双倍高度）。
+ *      手动折叠的后代必须停住并保留其 28px 外框，不进入贴合集合。
+ *      应在 planExpand 应用、nextTick 之后调用，以此时的 hidden/style 为准。
+ */
+export function collectExpandedGroupIds(nodes: CollapseNode[], rootId: string): string[] {
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  const byParent = new Map<string, CollapseNode[]>();
+  for (const node of nodes) {
+    if (!node.parentNode) continue;
+    const list = byParent.get(node.parentNode);
+    if (list) list.push(node);
+    else byParent.set(node.parentNode, [node]);
+  }
+  const result: string[] = [];
+  const visited = new Set<string>();
+  function visit(id: string) {
+    if (visited.has(id)) return;
+    visited.add(id);
+    const node = byId.get(id);
+    if (!node || node.hidden) return;
+    if (node.type === "canvasGroup") {
+      if (isCollapsedHeight(node)) return;
+      result.push(node.id);
+    }
+    for (const child of byParent.get(id) ?? []) visit(child.id);
+  }
+  visit(rootId);
+  return result;
+}
+
+/**
  * 展开分组时的完整计划：向上解开祖先，向下铺开自己这一支。
  *
  * ACT: 这是修 bug 的关键。原先只向下遍历，从不向上——内层点展开时外层
