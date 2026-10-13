@@ -297,13 +297,19 @@ ok("超长文本被截断，标题栏不会撑爆",
   longSummary.includes("一".repeat(SUMMARY_EXCERPT_LIMIT)) && !longSummary.includes("一".repeat(SUMMARY_EXCERPT_LIMIT + 1)));
 
 // F) 核心约束：绝不覆盖用户命名
-ok("用户命名「渡口对峙」折叠后仍显示这个名字", displayLabel("渡口对峙", true, kids) === "渡口对峙");
-ok("用户命名成「分组1」也不被覆盖（那是他自己的名字）", displayLabel("分组1", true, kids) === "分组1");
+// 2026-10-13 需求变更：用户命名的组折叠时也要能看到内容信息。
+//   新语义 =「名字 · 摘要」。名字永不改动，摘要只是折叠时的附加展示。
+ok("用户命名「渡口对峙」折叠后显示「渡口对峙 · 摘要」（名字在前，摘要在后）",
+  displayLabel("渡口对峙", true, kids) === `渡口对峙 · ${summarize(kids)}`,
+  displayLabel("渡口对峙", true, kids));
+ok("自定义名严格保留原样（连空格修剪后的内容不改）",
+  displayLabel("分组1", true, kids).startsWith("分组1 · "));
 ok("默认标签 + 折叠 → 显示摘要", displayLabel("分组", true, kids) === summarize(kids));
 ok("空标签 + 折叠 → 显示摘要", displayLabel("", true, kids) === summarize(kids));
 ok("展开态显示用户原名而非摘要", displayLabel("渡口对峙", false, kids) === "渡口对峙");
 ok("展开态无名字 → 「分组」", displayLabel("", false, kids) === "分组");
-ok("空分组折叠 → 退回「分组」而不是空标题", displayLabel("", true, []) === "分组");
+ok("空分组（未命名）折叠 → 退回「分组」而不是空标题", displayLabel("", true, []) === "分组");
+ok("空分组（已命名）折叠 → 只显名字，不出现空尾巴", displayLabel("渡口", true, []) === "渡口");
 ok("isDefaultLabel 正确识别默认与命名", isDefaultLabel("分组") && isDefaultLabel("") && isDefaultLabel(undefined) && !isDefaultLabel("渡口"));
 
 // G) 摘要必须实时（不缓存）

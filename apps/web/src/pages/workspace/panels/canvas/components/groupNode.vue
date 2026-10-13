@@ -382,6 +382,12 @@ watch(
   /* ACT: 折叠时框已压成标题条，缩放角会顶到框外，且没有可缩放的内容，直接隐藏。 */
   &.collapsed .resizeCorner { display: none; }
 
+  /* ACT: 摘要拼接后可能很长；折叠态标题限宽防撑爆，超出省略。 */
+  &.collapsed .groupLabel {
+    max-width: 240px;
+    bottom: calc(100% + 4px);
+  }
+
   .collapseToggle {
     position: absolute;
     top: 3px;

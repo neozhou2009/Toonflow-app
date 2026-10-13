@@ -88,13 +88,16 @@ export function isDefaultLabel(label: string | undefined): boolean {
 
 /**
  * 标题最终显示什么。
- * ACT: 折叠且未命名 → 摘要；用户命名过 → 他的名字；展开 → 原名。
+ * ACT: 展开态永远用原名——摘要只是折叠时的补充展示，绝不改动用户输入。
+ *      折叠态：
+ *      · 未命名 → 纯摘要；
+ *      · 用户命名过 → 「名字 · 摘要」（概要紧跟其后，名字始终在最前）；
+ *      · 空分组 → 原名退回「分组」，不拼接空摘要。
  */
 export function displayLabel(label: string | undefined, collapsed: boolean, children: SummaryNode[]): string {
   const named = (label ?? "").trim();
-  if (collapsed && isDefaultLabel(named)) {
-    const summary = summarize(children);
-    if (summary) return summary;
-  }
-  return named || DEFAULT_GROUP_LABEL;
+  if (!collapsed) return named || DEFAULT_GROUP_LABEL;
+  const summary = summarize(children);
+  if (!summary) return named || DEFAULT_GROUP_LABEL;
+  return isDefaultLabel(named) ? summary : `${named} · ${summary}`;
 }
