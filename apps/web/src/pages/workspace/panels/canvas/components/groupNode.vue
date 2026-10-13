@@ -216,17 +216,29 @@ async function collapseGroup() {
   for (const id of collectDescendants(flow.getNodes.value as CollapseNode[], props.id)) {
     flow.updateNode(id, { hidden: true, expandParent: false });
   }
+  const collapsedHeightPx = COLLAPSED_HEIGHT;
   flow.updateNode(props.id, { hidden: false, style: collapsedStyle(node as CollapseNode), expandParent: false });
+  // ACT: style 压了但 dimensions 还是旧值（如 300px），父组贴合时会按旧值算，
+  //      框缩不下来——用户第二次反馈的正是这个。折叠态高度是确定值 COLLAPSED_HEIGHT，
+  //      直接同步 dimensions，不等 DOM。
+  node.dimensions = { ...node.dimensions, height: collapsedHeightPx };
   // ACT: 子树藏起来后父框必须收缩，否则下面留一大块空白。
   //      不能用上游 fitGroupBounds——它不过滤 hidden 子节点，量到旧尺寸永远缩不小，
   //      所以用只算可见子节点的 fitChainToVisible。等 DOM 量完再算，早了是旧值。
   await nextTick();
-  for (const step of fitChainToVisible(flow.getNodes.value as CollapseNode[], props.id)) {
+  // ACT: 焦点组自己压扁后不必再"按可见子节点贴合"（它只剩标题条高，贴合会算出
+  //      内边距尺寸把 28 又撑大），只对它之上的祖先链逐层收缩。
+  let ancestorId = node.parentNode;
+  const visited = new Set<string>([props.id]);
+  while (ancestorId && !visited.has(ancestorId)) {
+    visited.add(ancestorId);
+    const step = fitChainToVisible(flow.getNodes.value as CollapseNode[], ancestorId).at(0);
+    if (!step) break;
     const target = flow.findNode(step.groupId);
-    if (!target) continue;
+    if (!target) break;
     const parent = target.parentNode ? flow.findNode(target.parentNode) : undefined;
-    const px = parent?.computedPosition.x ?? 0;
-    const py = parent?.computedPosition.y ?? 0;
+    const px = parent?.computedPosition?.x ?? 0;
+    const py = parent?.computedPosition?.y ?? 0;
     for (const shift of step.shifts) {
       const child = flow.findNode(shift.id);
       if (child) flow.updateNode(child.id, { position: { x: child.position.x + shift.dx, y: child.position.y + shift.dy } });
@@ -237,6 +249,7 @@ async function collapseGroup() {
     });
     const live = flow.findNode(step.groupId);
     if (live) live.dimensions = { width: step.width, height: step.height };
+    ancestorId = live?.parentNode;
   }
 }
 

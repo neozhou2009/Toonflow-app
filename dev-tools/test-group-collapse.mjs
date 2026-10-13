@@ -326,7 +326,28 @@ ok("增删节点后摘要实时变化，不存在过期摘要", before !== after
     chain[0].shifts.length === (chain[0].shifts.length ? 1 : 0) || chain[0].shifts.length <= 2);
 }
 
-// 13) 回归：全部子节点 hidden 时父组不能再收缩（无可量边界，保持现状）'
+// 12b) 回归：折叠落地一步后，下一步的计划必须用「落地后的 dimensions」重算
+{
+  const f = new FakeFlow([
+    { id: "P", type: "canvasGroup", style: { height: "400px" }, data: { label: "分组" }, dimensions: { width: 800, height: 400 } },
+    { id: "C", type: "canvasGroup", parentNode: "P", position: { x: 30, y: 50 }, style: { height: "300px" }, data: { label: "分组" }, dimensions: { width: 700, height: 300 } },
+    { id: "n1", type: "textNode", parentNode: "P", position: { x: 40, y: 60 }, data: { label: "文本" }, dimensions: { width: 100, height: 80 } },
+  ]);
+  collapseGroup(f, "C");
+  // 落地：模拟组件把 C 的 dimensions 压成 28（组件里折叠同步的那一步）
+  const C = f.findNode("C");
+  C.dimensions = { ...C.dimensions, height: 28 };
+  const planP = planFitVisible(f.getNodes.value, "P");
+  ok("回归：焦点组 dimensions 同步后，父组的贴合计划高度真的小了",
+    planP !== undefined && planP.height < 160, `P 计划高度=${planP?.height}`);
+  // 反证：dimensions 不同步（=300）时，计划高度会被撑大
+  const nodes2 = f.getNodes.value.map(n => n.id === "C" ? { ...C, dimensions: { width: 700, height: 300 } } : n);
+  const planBad = planFitVisible(nodes2, "P");
+  ok("回归：反证——dimensions 不同步时父组计划高度明显更大",
+    planBad !== undefined && planBad.height >= 300, `不缩=${planBad?.height}px vs 缩=${planP?.height}px`);
+}
+
+// 13) 回归：全部子节点 hidden 时父组不能再收缩（无可量边界，保持现状）
 {
   const f = new FakeFlow([
     { id: "Q", type: "canvasGroup", style: { height: "300px" }, data: {}, dimensions: { width: 500, height: 300 } },
