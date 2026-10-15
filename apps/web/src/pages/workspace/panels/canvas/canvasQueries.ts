@@ -153,7 +153,21 @@ export function createCanvasQueries(source: {
   return async function read(request: CanvasToolCall, canvasId: string, signal: AbortSignal) {
     if (!isCanvasRead(request.name)) throw new Error("未知画布查询");
     const name = request.name as "getCanvas" | "findCanvasNodes" | "getCanvasNodes" | "getCanvasEdges" | "getNodeTools";
-    const args = canvasSchemas[name].parse(request.args);
+    const rawCursor = "cursor" in request.args && typeof request.args.cursor === "string" ? request.args.cursor : undefined;
+    let page: unknown;
+    if (rawCursor) {
+      try { page = JSON.parse(rawCursor); } catch { /* 非分页游标从首屏重新查询。 */ }
+    }
+    // ACT: 仅签发的数组游标可指定偏移；自造的 "0"、"x" 等值安全地从首屏读取。
+    const cursorReset = Boolean(rawCursor && (!Array.isArray(page) || page.length !== (name === "getCanvas" ? 7 : 6)));
+    const input = cursorReset ? { ...request.args, cursor: undefined } : request.args;
+    let args = canvasSchemas[name].parse(input);
+    if (args.cursor) {
+      if (name === "getCanvas" && Array.isArray(page) && page.length === 7) {
+        // ACT: 续页以游标中的首次查询选项为准；调用方只传 nextCursor 也能继续读取同一列表。
+        args = canvasSchemas.getCanvas.parse({ ...request.args, ...page[6] });
+      }
+    }
     if (args.canvasId !== undefined && args.canvasId !== canvasId) throw new Error("目标画布已切换，请重新查询画布");
     const { cursor, ...filters } = args;
     const metadata = name === "getCanvas" ? {
@@ -163,12 +177,11 @@ export function createCanvasQueries(source: {
     const digest = await crypto.subtle.digest("SHA-256", encoder.encode(JSON.stringify([name, filters, metadata])));
     signal.throwIfAborted();
     const key = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
-    const revision = name === "getCanvasEdges" ? source.edgeRevision() : name === "getNodeTools" ? `${source.nodeRevision()}:${source.nodeTools().version}` : source.nodeRevision();
+    // ACT: getCanvas 分页只读取画布列表和节点类型；内容哈希校验这些数据，节点增删不应使游标失效。
+    const revision = name === "getCanvas" ? 0 : name === "getCanvasEdges" ? source.edgeRevision() : name === "getNodeTools" ? `${source.nodeRevision()}:${source.nodeTools().version}` : source.nodeRevision();
     let offset = 0;
     if (cursor) {
-      let page: unknown;
-      try { page = JSON.parse(cursor); } catch { throw new Error("分页游标无效，请重新查询"); }
-      if (!Array.isArray(page) || page.length !== 6 || page[0] !== sessionId || page[1] !== canvasId || page[2] !== revision || page[3] !== key || !Number.isSafeInteger(page[4]) || page[4] < 0 || page[5] !== name) {
+      if (!Array.isArray(page) || page.length !== (name === "getCanvas" ? 7 : 6) || page[0] !== sessionId || page[1] !== canvasId || page[2] !== revision || page[3] !== key || !Number.isSafeInteger(page[4]) || page[4] < 0 || page[5] !== name) {
         throw new Error("画布结构或查询参数已变化，分页游标失效，请重新查询");
       }
       offset = page[4];
@@ -186,20 +199,22 @@ export function createCanvasQueries(source: {
       return true;
     }
     function finish(field: string, hasMore: boolean, extra: Record<string, unknown> = {}) {
-      const result = { canvasId, ...(field ? { [field]: items } : {}), ...extra, hasMore, nextCursor: hasMore ? JSON.stringify([sessionId, canvasId, revision, key, offset, name]) : null };
+      const result = { canvasId, ...(field ? { [field]: items } : {}), ...extra, ...(cursorReset ? { cursorReset: true } : {}), hasMore, nextCursor: hasMore ? JSON.stringify(name === "getCanvas"
+        ? [sessionId, canvasId, revision, key, offset, name, filters]
+        : [sessionId, canvasId, revision, key, offset, name]) : null };
       if (jsonSize(result) > responseBytes) throw new Error("读取结果超过 64 KiB，请缩小查询范围");
       return result;
     }
 
     switch (name) {
       case "getCanvas": {
-        const args = canvasSchemas.getCanvas.parse(request.args);
+        const canvasArgs = args as ReturnType<typeof canvasSchemas.getCanvas.parse>;
         const canvases = metadata!.canvases;
         const types = metadata!.types;
         const total = Math.max(canvases.length, types.length);
         const canvasItems: unknown[] = [];
         const typeItems: unknown[] = [];
-        while (offset < total && items.length < args.limit) {
+        while (offset < total && items.length < canvasArgs.limit) {
           const canvas = canvases[offset];
           const type = types[offset];
           const pair = { ...(canvas ? { canvas } : {}), ...(type ? { type } : {}) };
@@ -211,8 +226,8 @@ export function createCanvasQueries(source: {
         return finish("", offset < total, {
           id: canvasId, nodeCount: source.nodes().length, edgeCount: source.edges().length,
           selectedCount: source.selectedCount(), viewport: { ...source.viewport() },
-          ...(args.include?.includes("canvases") ? { canvases: canvasItems, canvasCount: canvases.length } : {}),
-          ...(args.include?.includes("nodeTypes") ? { availableNodeTypes: typeItems, nodeTypeCount: types.length } : {}),
+          ...(canvasArgs.include?.includes("canvases") ? { canvases: canvasItems, canvasCount: canvases.length } : {}),
+          ...(canvasArgs.include?.includes("nodeTypes") ? { availableNodeTypes: typeItems, nodeTypeCount: types.length } : {}),
         });
       }
       case "findCanvasNodes": {
