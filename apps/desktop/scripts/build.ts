@@ -53,8 +53,9 @@ for (const script of mode === "dev" ? ["dev:plugins"] : [
 ]) {
   await $`${process.execPath} run ${script}`.cwd(projectDir);
 }
-await $`${process.execPath} run --filter @toonflow/web build`.cwd(projectDir);
-await $`${process.execPath} run --filter @toonflow/mcp build`.cwd(projectDir);
+// ACT: Web 构建走 vite，必须用 --bun 才能加载 workspace 的 .ts 入口；mcp 本身是 bun 脚本。
+await $`${process.execPath} run --bun --filter @toonflow/web build`.cwd(projectDir);
+await $`${process.execPath} run --bun --filter @toonflow/mcp build`.cwd(projectDir);
 const agentDirectory = dirname(realpathSync(Bun.resolveSync("@earendil-works/pi-coding-agent", resolve(projectDir, "apps/server"))));
 const photonDirectory = dirname(Bun.resolveSync("@silvia-odwyer/photon-node", agentDirectory));
 const photonOutput = resolve(projectDir, "build/desktop/photon");
