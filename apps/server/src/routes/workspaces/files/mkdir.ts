@@ -1,9 +1,9 @@
-import { mkdir } from "@toonflow/file";
+import { lstat, mkdir } from "@toonflow/file";
 import { Router } from "express";
 import { z } from "zod";
 import u from "@/utils";
 import { validateFields } from "@/lib/middleware";
-import { success } from "@/lib/responseFormat";
+import { errorFromCause, success } from "@/lib/responseFormat";
 
 const router = Router();
 
@@ -12,6 +12,15 @@ export default router.post("/", validateFields({ directory: z.string().min(1).ma
   u.workspaceFile.protectWorkspaceRoot(directory, path);
   const release = u.workspaceFile.lockWorkspaceFiles([path]);
   try { await mkdir(path); }
+  catch (cause) {
+    const failure = cause as NodeJS.ErrnoException;
+    const existsAsDirectory = failure.code === "EEXIST" && await lstat(path).then(info => info.isDirectory(), () => false);
+    if (existsAsDirectory) {
+      const body = errorFromCause(cause);
+      return res.status(body.code).json(body);
+    }
+    throw cause;
+  }
   finally { release(); }
   res.json(success());
 });
