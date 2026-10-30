@@ -119,9 +119,9 @@ export async function createApp({
   app.use(express.static(webRoot));
 
   // 错误处理
-  app.use((err: Error & { status?: number }, request: Request, response: Response, next: NextFunction) => {
+  app.use((err: Error & { status?: number; code?: string }, request: Request, response: Response, next: NextFunction) => {
     if (response.headersSent) return next(err);
-    console.error(err);
+    if (!(request.method === "GET" && request.path === "/api/workspaces/files/read" && err.code === "ENOENT")) console.error(err);
     const body = errorFromCause(err);
     response.status(body.code).json(body);
   });
