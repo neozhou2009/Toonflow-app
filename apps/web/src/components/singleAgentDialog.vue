@@ -2,7 +2,7 @@
   <el-dialog
     v-model="visible"
     class="singleAgentDialog"
-    :title="title"
+    :title="title ?? 'Agent 对话'"
     :width="slots.aside ? 'min(1240px, calc(100vw - 32px))' : 'min(800px, calc(100vw - 32px))'"
     alignCenter
     appendToBody
@@ -78,6 +78,7 @@ import toolMessage from "./agent/toolMessage.vue";
 import { createReplyStream, readAgentEvents } from "./agent/replyStream";
 import { modelChoices } from "@/stores/settings";
 import { writeClipboardText } from "@/lib/clipboard";
+import { showNotification } from "@/lib/notification";
 
 const props = withDefaults(defineProps<{
   tools?: SingleAgentTool[];
@@ -86,7 +87,7 @@ const props = withDefaults(defineProps<{
   directory?: string;
   title?: string;
   placeholder?: string;
-}>(), { tools: () => [], systemPrompt: "", initialMessage: "", title: "Agent 对话", placeholder: "输入消息" });
+}>(), { tools: () => [], systemPrompt: "", initialMessage: "", placeholder: "输入消息" });
 const visible = defineModel<boolean>({ default: false });
 const msgList = defineModel<AgentMessage[]>("msgList", { default: () => [] });
 const selectedModel = defineModel<string>("model", { default: "" });
@@ -186,7 +187,7 @@ async function executeClientTool(event: Extract<SingleAgentEvent, { type: "clien
   } catch (error) {
     acceptingUpdates = false;
     if (signal.aborted) return;
-    try { await sendResult({ error: error instanceof Error ? error.message : "工具执行失败" }); }
+    try { await sendResult({ error: error instanceof Error ? error.message : translate("工具执行失败") }); }
     catch (reason) {
       if (!signal.aborted && lifecycle === owner && turnController === controller) {
         reportError(reason);
@@ -211,6 +212,8 @@ async function send(content = draft.value) {
   turnId = reply.id;
   const stream = createReplyStream(reply);
   let accepted = false;
+  let notifiedCompletion = false;
+  const notifiedQuestions = new Set<string>();
   try {
     const id = await ensureSession(owner, signal);
     signal.throwIfAborted();
@@ -225,12 +228,22 @@ async function send(content = draft.value) {
     });
     for await (const event of readAgentEvents<SingleAgentEvent>(response, signal)) {
       if (lifecycle !== owner) break;
-      if (event.type === "text" || event.type === "thinking" || event.type === "tool" || event.type === "question") stream.receive(event);
+      if (event.type === "text" || event.type === "thinking" || event.type === "tool" || event.type === "question" || event.type === "retry") stream.receive(event);
+      if (event.type === "question" && !signal.aborted && !notifiedQuestions.has(event.callId)) {
+        notifiedQuestions.add(event.callId);
+        void showNotification({ title: "Toonflow", body: translate("工具正在等待你的确认") })
+          .catch(error => console.warn("系统通知发送失败", error));
+      }
       if (event.type === "status") changeStatus(event.status);
       if (event.type === "tool" || event.type === "toolResult" || event.type === "clientTool") emit("toolEvent", event);
       if (event.type === "clientTool") void executeClientTool(event, id, signal, owner, controller);
       if (event.type === "complete") {
         stream.finish();
+        if (!notifiedCompletion && !signal.aborted) {
+          notifiedCompletion = true;
+          void showNotification({ title: "Toonflow", body: translate("Agent 已完成回复") })
+            .catch(error => console.warn("系统通知发送失败", error));
+        }
         emit("complete", { text: event.text, toolResults: event.toolResults, messages: JSON.parse(JSON.stringify(msgList.value)) });
       }
     }

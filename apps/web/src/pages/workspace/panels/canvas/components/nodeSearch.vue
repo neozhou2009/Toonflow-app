@@ -34,6 +34,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
+import { translate } from "@toonflow/i18n/vue";
 import { useVueFlow } from "@vue-flow/core";
 import { IconSearch } from "@tabler/icons-vue";
 import type { InputInstance } from "element-plus";
@@ -48,7 +49,7 @@ const resultList = ref<HTMLElement>();
 const results = computed(() => {
   const keyword = query.value.trim().toLocaleLowerCase();
   return flow.getNodes.value.filter(node => !node.hidden).map(node => ({
-    node, label: String(node.data.label || node.type || "未命名节点"),
+    node, label: String(node.data.label || node.type || translate("未命名节点")),
   })).filter(item => `${item.label} ${item.node.type} ${item.node.id}`.toLocaleLowerCase().includes(keyword));
 });
 watch(query, () => { activeIndex.value = 0; });

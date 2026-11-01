@@ -39,19 +39,10 @@
     </el-card>
     <div class="menuExtension"><slot /></div>
   </panel>
-  <panel v-if="visibleProviderBalances.length" class="balanceMenuPanel" position="top-right">
+  <panel v-if="providerBalances.length" class="balanceMenuPanel" position="top-right">
     <div class="balanceList" tabindex="0" aria-label="供应商余额">
-      <el-card v-for="item in visibleProviderBalances" :key="item.id" class="balanceCard" shadow="never" :bodyStyle="{ padding: '2px 4px' }">
-        <el-popover v-if="item.id === 'tfRouter'" :visible="balanceVisible" @update:visible="value => { if (!rechargeVisible) balanceVisible = value; }" trigger="click" placement="bottom-end" :width="360" :showArrow="false">
-          <template #reference>
-            <el-button class="balanceTrigger" text :aria-busy="item.loading" :title="item.error || 'TF-Router 剩余可用余额'" aria-label="TF-Router 余额与充值">
-              <span class="providerLabel">{{ item.label }}</span>
-              <span>{{ item.balance ? `${balanceFormat.format(Math.min(item.balance.balance, item.balance.keyBalance ?? Infinity))} ${item.balance.unit}` : '—' }}</span>
-            </el-button>
-          </template>
-          <tfAccount v-if="balanceVisible" :apiKey="tfBalanceApiKey" :visible="balanceVisible" :saveApiKey="saveTfMediaApiKey" @rechargeVisibleChange="rechargeVisible = $event" />
-        </el-popover>
-        <el-button v-else class="balanceTrigger" text :loading="item.loading" :title="item.error || `点击刷新 ${item.label} 余额`" :aria-label="`刷新 ${item.label} 余额`" @click="refreshProviderBalance(item.id)">
+      <el-card v-for="item in providerBalances" :key="item.id" class="balanceCard" shadow="never" :bodyStyle="{ padding: '2px 4px' }">
+        <el-button class="balanceTrigger" text :loading="item.loading" :title="item.error || `点击刷新 ${item.label} 余额`" :aria-label="`刷新 ${item.label} 余额`" @click="refreshProviderBalance(item.id)">
           <span class="providerLabel">{{ item.label }}</span>
           <span>{{ item.balance ? `${balanceFormat.format(Math.min(item.balance.balance, item.balance.keyBalance ?? Infinity))} ${item.balance.unit}` : '—' }}</span>
         </el-button>
@@ -89,8 +80,8 @@ import { IconVector, IconCheck, IconChevronDown, IconChevronUp, IconChevronRight
 import { useWorkspaceStore } from "@/stores/workspace";
 import useWorkspaceFiles from "@/lib/workspaceFiles";
 import { getCanvasAssetDirectories, isCanvasFile } from "@/pages/workspace/canvasFile";
-import tfAccount from "@/components/settings/tfAccount.vue";
-import { providerBalances, tfBalanceApiKey, saveTfMediaApiKey, refreshProviderBalance } from "@/lib/providerBilling";
+import { findRemainingCanvas } from "../canvasFiles";
+import { providerBalances, refreshProviderBalance } from "@/lib/providerBilling";
 
 const props = defineProps<{
   directory?: string;
@@ -99,11 +90,8 @@ const props = defineProps<{
   flushSave: (action?: () => Promise<void>) => Promise<void>;
 }>();
 const workspaceStore = useWorkspaceStore();
-const balanceVisible = ref(false);
-const rechargeVisible = ref(false);
 const balanceFormat = computed(() => new Intl.NumberFormat(locale.value, { maximumFractionDigits: 6 }));
-const visibleProviderBalances = computed(() => providerBalances.value.filter(item => item.id !== "tfRouter" || (item.balance && !item.error)));
-const workspaceName = computed(() => workspaceStore.project?.name || "未命名工作区");
+const workspaceName = computed(() => workspaceStore.project?.name || translate("未命名工作区"));
 const projectNameDraft = ref("");
 watch([() => workspaceStore.project?.directory, workspaceName], () => {
   projectNameDraft.value = workspaceName.value;
@@ -307,31 +295,36 @@ watch(() => props.directory, async (directory, _previous, onCleanup) => {
     editingId.value = null;
     renameError.value = "";
     if (!directory) return;
-    if (props.initialCanvasId === "") return;
     if (props.initialCanvasId) {
       await applyCanvas(props.initialCanvasId, directory);
       return;
     }
-    let entries = await listCanvases(directory, "", false, controller.signal);
-    let loaded = entries.canvases;
+    await loadDirectory("");
+    // ACT: 根目录无画布时逐层查找，找到即停止；其余目录仍按需加载。
+    for (let index = 0; !canvases.value.length && index < folders.value.length; index++) {
+      await loadDirectory(folders.value[index]!.path);
+    }
     if (cancelled) return;
-    if (!loaded.length && !entries.folders.length) {
+    if (!canvases.value.length) {
       try {
-        loaded = [await createCanvasFile(directory, "画布1")];
+        const canvas = await createCanvasFile(directory, "画布1", controller.signal);
+        checkCanvasDirectory(directory, controller.signal);
+        mergeCanvases([canvas]);
       } catch (err) {
         if (!axios.isAxiosError<{ data?: { code?: string } }>(err) || err.response?.status !== 409 || err.response.data.data?.code !== "EEXIST") throw err;
         // 同时打开工作区时，读取另一请求刚创建的默认画布，不覆盖同名文件。
-        entries = await listCanvases(directory, "", false, controller.signal);
-        const refreshed = entries.canvases;
+        loadedDirectories.value = loadedDirectories.value.filter(path => path !== "");
+        await loadDirectory("");
         // 画布1.json 若被其他 JSON 占用，则使用下一个空闲名称，保留原文件。
-        loaded = refreshed.length ? refreshed : [await createCanvasFile(directory)];
+        if (!canvases.value.length) {
+          const canvas = await createCanvasFile(directory, undefined, controller.signal);
+          checkCanvasDirectory(directory, controller.signal);
+          mergeCanvases([canvas]);
+        }
       }
     }
     if (cancelled) return;
-    folders.value = entries.folders;
-    loadedDirectories.value = [""];
-    canvases.value = loaded;
-    if (canvases.value[0]) await applyCanvas(canvases.value[0].id, directory);
+    if (canvases.value[0]) await applyCanvas(canvases.value[0].id, directory, controller.signal);
   } catch (err) {
     if (!cancelled) {
       loadError.value = errorMessage(err, "读取画布失败");
@@ -438,18 +431,24 @@ async function removeCanvas(canvas: Canvas) {
   busy.value = true;
   canvasListVisible.value = false;
   try {
-    const confirmed = await ElMessageBox.confirm(`确定删除“${canvas.name}”？对应的 ${id} 文件及独占的节点素材也会被删除，其他画布共用的素材会保留。此操作不可撤销。`, "删除画布", {
+    const files = useWorkspaceFiles(directory);
+    const nextCanvas = await findRemainingCanvas(files, id, treeController.signal);
+    checkCanvasDirectory(directory, treeController.signal);
+    if (!nextCanvas) {
+      ElMessage.warning("项目里需要保留至少一个画布。你可以先新建一个，再删除这个画布。");
+      return;
+    }
+    mergeCanvases([nextCanvas]);
+    const confirmed = await ElMessageBox.confirm(`确定删除画布“${canvas.name}”吗？对应的“${id}”文件及仅由这个画布使用的素材也会删除，其他画布共用的素材会保留。删除后无法恢复。`, "删除画布", {
       type: "warning", confirmButtonText: "删除", cancelButtonText: "取消", closeOnClickModal: false,
     }).then(() => true, () => false);
     if (!confirmed) return;
     checkCanvasDirectory(directory);
-    const nextCanvas = canvases.value.find(item => item.id !== id);
-    if (nextCanvas && activeCanvasId.value === id) await applyCanvas(nextCanvas.id, directory);
-    const files = useWorkspaceFiles(directory);
+    if (activeCanvasId.value === id) await applyCanvas(nextCanvas.id, directory);
     const readNodes = async (canvasId: string) => {
       const data = await files.readJson<{ toonflowCanvas?: boolean; nodes?: { id: string; data?: unknown }[] }>(canvasId);
       if (data?.toonflowCanvas !== true || !Array.isArray(data.nodes) || data.nodes.some(node => !node || typeof node.id !== "string")) {
-        throw new Error(`无法确认 ${canvasId} 的素材引用`);
+        throw new Error(`无法确认画布“${canvasId}”的素材引用，已停止后续删除操作。`);
       }
       return [...data.nodes, ...getRetainedNodes(canvasId)];
     };
@@ -507,7 +506,7 @@ async function listCanvasEntries(directory: string, path = "", recursive = false
   const files = useWorkspaceFiles(directory);
   const { entries, empty } = await files.list(path, signal);
   const folders: CanvasEntry[] = [];
-  // ACT: 初始化与展开只读当前一层；完整查询仅由搜索、Agent 列举及文件操作显式触发。
+  // ACT: 每次只读当前一层；完整查询仅由搜索、Agent 列举及文件操作显式触发。
   for (let index = 0; index < entries.length; index++) {
     checkCanvasDirectory(directory, signal);
     const entry = entries[index]!;
@@ -596,8 +595,8 @@ function cancelFolder() { if (!busy.value) folderDraft.value = null; }
 
 function normalizeFolderName(name: string) {
   name = normalizeCanvasName(name, "文件夹");
-  if (name.toLowerCase() === "assets") throw new Error("assets 是节点素材目录，请使用其他文件夹名称");
-  if (name.toLowerCase() === ".agent") throw new Error(".agent 是 Agent 数据目录，请使用其他文件夹名称");
+  if (name.toLowerCase() === "assets") throw new Error("“assets”是保留的节点素材目录名称，请使用其他文件夹名称。");
+  if (name.toLowerCase() === ".agent") throw new Error("“.agent”是保留的 Agent 数据目录名称，请使用其他文件夹名称。");
   return name;
 }
 

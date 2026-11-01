@@ -46,15 +46,14 @@
       <input ref="fileInput" class="fileInput" type="file" accept="video/*" aria-label="选择视频" :disabled="uploading || exporting" @change="uploadVideo" />
       <el-button
         v-if="!exporting && !outputs.video"
-        class="uploadButton"
+        class="nodrag nopan"
+        :icon="IconUpload"
         text
         :loading="uploading"
         title="上传视频"
         aria-label="上传视频"
         @dblclick.stop
-        @click="fileInput?.click()">
-        <icon-upload v-if="!uploading" :size="48" stroke="1.5" />
-      </el-button>
+        @click.stop="fileInput?.click()">上传</el-button>
     </div>
   </nodeSkeleton>
   <videoActions ref="actions" :file="outputFile" :src="previewUrl" :disabled="uploading || exporting" />
@@ -67,6 +66,7 @@ import { ElButton, ElMessage, ElProgress, ElDropdown, ElDropdownMenu, ElDropdown
 import { nodeSkeleton, nodeTools, useNode, z, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
 import videoPlayer from "./components/videoPlayer.vue";
 import videoActions from "./components/videoActions.vue";
+import { getMediaMimeType } from "@toonflow/node-shared/mediaTypes";
 
 defineOptions({
   inheritAttrs: false,
@@ -138,13 +138,14 @@ async function uploadVideo(event: Event) {
   const file = input.files?.[0];
   input.value = "";
   if (!file || uploading.value || exporting.value) return;
-  if (!file.type.startsWith("video/")) return void ElMessage.error("请选择视频文件");
+  const mimeType = getMediaMimeType(file);
+  if (!mimeType.startsWith("video/")) return void ElMessage.error("请选择视频文件");
   if (!file.size || file.size > 100 * 1024 * 1024) return void ElMessage.error("视频不能为空且不能超过 100 MB");
   uploading.value = true;
   try {
     const url = await files.uploadFile(file);
     // ACT: 复制节点可能仍引用旧视频，替换输出不删除共享文件。
-    outputs.value.video = { dataType: "VIDEO", value: { url, mimeType: file.type } };
+    outputs.value.video = { dataType: "VIDEO", value: { url, mimeType } };
   } catch (error) {
     showError(error, "视频替换失败");
   } finally {
@@ -160,6 +161,15 @@ function showError(error: unknown, fallback: string) {
 
 <style scoped lang="scss">
 .videoContent {
+  .nodeSkeleton.resized & {
+    height: 100%;
+    min-height: 0;
+    grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+    --nodeMediaHeight: 100%;
+
+    .exportLoading { max-height: 100%; box-sizing: border-box; overflow: auto; }
+  }
+
   position: relative;
   display: grid;
   place-items: center;
@@ -178,17 +188,6 @@ function showError(error: unknown, fallback: string) {
 
   .fileInput {
     display: none;
-  }
-
-  .uploadButton {
-    width: 100%;
-    height: 144px;
-    padding: 0;
-    color: var(--el-text-color-placeholder);
-
-    &:hover {
-      color: var(--el-color-primary);
-    }
   }
 }
 </style>

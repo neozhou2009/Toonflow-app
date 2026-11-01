@@ -10,14 +10,18 @@ import { getAgentModelConfiguration } from "@/agent/runtime/model";
 
 const inputSchema = z.object({
   prompt: z.string().trim(), directory: z.string().min(1),
+  runId: z.uuid().optional(),
+  expectedRunId: z.uuid().optional(),
   attachments: u.agent.agentAttachmentsSchema.optional(),
   mentions: u.agent.agentMentionsSchema.optional(),
   providerId: z.string().min(1), modelId: z.string().min(1),
   thinkingLevel: z.enum(thinkingLevels).optional(),
   sessionFile: z.string().regex(/^[\w-]+\.jsonl$/).optional(),
   resendFrom: z.string().min(1).max(128).optional(),
+  streamingBehavior: z.enum(["steer", "followUp"]).optional(),
   canvas: z.strictObject({
-    id: z.string().min(1).max(256),
+    // 允许空 id：尚未打开画布时前端仍会带上画布上下文，Agent 可据此调用 addCanvas/getCanvas。
+    id: z.string().max(256),
     tools: z.array(z.strictObject({
       nodeId: z.string().min(1).max(256),
       name: z.string().max(101).regex(/^node:[a-z][a-zA-Z0-9]*$/),
@@ -29,39 +33,58 @@ const inputSchema = z.object({
 });
 
 export default Router().post("/", validateFields(inputSchema.shape), async (req, res) => {
-  const { directory, canvas, ...options } = req.body as z.infer<typeof inputSchema>;
-  const cwd = await u.workspace.resolveWorkspace(req, directory);
-  getAgentModelConfiguration(options.providerId, options.modelId, options.thinkingLevel);
-  res.set({ "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" });
-  res.flushHeaders();
-  const send = (event: AgentEvent) => {
-    if (event.type === "error") event = { ...event, message: translateMessage(event.message) };
-    if (event.type === "session") options.sessionFile = event.file;
-    u.agent.trackAgentEvent(cwd, options.sessionFile, event);
-    if (!res.destroyed) res.write(`${JSON.stringify(event)}\n`);
-  };
-  const bridge = canvas ? u.canvas.createCanvasContext(cwd, canvas as CanvasInfo, send) : undefined;
+  const { directory, canvas, runId = crypto.randomUUID(), ...options } = req.body as z.infer<typeof inputSchema>;
+  if (options.streamingBehavior && !options.expectedRunId) {
+    throw Object.assign(new Error("排队或引导需要指定当前任务标识，请刷新对话后重试"), { status: 400 });
+  }
   const controller = new AbortController();
-  const questions = u.question.createQuestionContext(cwd, send, () => controller.abort());
-  const heartbeat = setInterval(() => {
-    if (!res.destroyed && !res.writableEnded && !res.writableNeedDrain) res.write("\n");
-  }, 20000);
-  const close = () => { clearInterval(heartbeat); bridge?.dispose(); questions.dispose(); controller.abort(); };
+  let bridge: ReturnType<typeof u.canvas.createCanvasContext> | undefined;
+  let questions: ReturnType<typeof u.question.createQuestionContext> | undefined;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let send: ((event: AgentEvent) => void) | undefined;
+  let unregister = () => {};
+  const finished = Promise.withResolvers<void>();
+  const close = () => { clearInterval(heartbeat); bridge?.dispose(); questions?.dispose(); controller.abort(); };
+  const stop = () => { controller.abort(new DOMException("已停止生成", "AbortError")); close(); };
   res.once("close", close);
   req.once("aborted", close);
   req.socket.once("close", close);
   try {
-    await u.agent.run({ ...options, cwd, canvas: bridge?.context, question: questions.context, signal: controller.signal, onCancel: close }, send);
+    if (req.aborted || res.destroyed || req.socket.destroyed) close();
+    controller.signal.throwIfAborted();
+    const workspace = u.workspace.resolveWorkspace(req, directory);
+    const run = { runId, directory: workspace.then(cwd => cwd, () => undefined), abort: stop, finished: finished.promise };
+    unregister = u.agent.registerAgentRun(run);
+    const cwd = await workspace;
+    controller.signal.throwIfAborted();
+    getAgentModelConfiguration(options.providerId, options.modelId, options.thinkingLevel);
+    res.set({ "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" });
+    res.flushHeaders();
+    send = (event: AgentEvent) => {
+      if (event.type === "error") event = { ...event, message: translateMessage(event.message) };
+      if (event.type === "session") options.sessionFile = event.file;
+      u.agent.trackAgentEvent(cwd, options.sessionFile, event);
+      if (!res.destroyed && !res.writableEnded) res.write(`${JSON.stringify(event)}\n`);
+    };
+    bridge = canvas ? u.canvas.createCanvasContext(cwd, canvas as CanvasInfo, send, reason => controller.abort(reason)) : undefined;
+    questions = u.question.createQuestionContext(cwd, send, stop);
+    heartbeat = setInterval(() => {
+      if (!res.destroyed && !res.writableEnded && !res.writableNeedDrain) res.write("\n");
+    }, 20000);
+    await u.agent.run({ ...options, runId, cwd, canvas: bridge?.context, question: questions.context, signal: controller.signal, onCancel: stop }, send);
     send({ type: "done" });
   } catch (error) {
-    send({ type: "error", message: error instanceof Error ? translateError(error) : translateMessage("Agent 运行失败") });
+    if (!res.headersSent) throw error;
+    send?.({ type: "error", message: error instanceof Error ? translateError(error) : translateMessage("Agent 运行失败") });
   } finally {
     clearInterval(heartbeat);
     res.off("close", close);
     req.off("aborted", close);
     req.socket.off("close", close);
     bridge?.dispose();
-    questions.dispose();
-    res.end();
+    questions?.dispose();
+    unregister();
+    finished.resolve();
+    if (res.headersSent && !res.writableEnded) res.end();
   }
 });

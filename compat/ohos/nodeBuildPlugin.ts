@@ -23,7 +23,8 @@ const memberReplacements: Record<string, Record<string, string>> = {
   "apps/server/src/utils/plugins/ext.ts": { "Bun.hash": "hash" },
   "apps/server/src/utils/plugins/initializeExt.ts": { "Bun.hash": "hash" },
   "apps/server/src/utils/teams/files.ts": { "new Bun.Transpiler": "createTranspiler" },
-  "packages/ffmpeg/src/index.ts": { "Bun.spawn": "spawnProcess", "Bun.which": "which" },
+  "packages/ffmpeg/src/index.ts": { "Bun.which": "which" },
+  "packages/ffmpeg/src/ffmpegWorker.ts": { "Bun.spawn": "spawnProcess" },
 };
 const specialFiles = new Set(["apps/mobile/src/server.ts", "apps/server/src/utils/mcp/resources.ts", "packages/file/src/index.ts"]);
 

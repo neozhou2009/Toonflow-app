@@ -9,50 +9,153 @@
     <div ref="expandedTarget" class="promptExpandedTarget nodrag nopan nowheel" @pointerdown.stop @mousedown.stop @dblclick.stop />
   </el-dialog>
   <el-image-viewer v-if="previewUrl" :urlList="[previewUrl]" teleported @close="previewReferenceId = undefined" />
+  <teleport :to="mentionTarget || 'body'">
+    <promptReferenceMenu
+      v-if="mentionVisible"
+      ref="mentionMenu"
+      :references="references"
+      :materials="materials ?? []"
+      :query="mentionQuery"
+      :anchor="mentionAnchor"
+      :zIndex="mentionZIndex"
+      :busy="selectingReference"
+      :hasAssetLibrary="!!selectAsset"
+      @select="id => chooseReference(() => references.find(item => item.id === id))"
+      @selectMaterial="id => chooseReference(() => selectMaterial?.(id))"
+      @selectAsset="chooseReference(() => selectAsset?.())"
+      @close="dismissMentionMenu" />
+  </teleport>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { ElButton, ElDialog, ElImageViewer, useZIndex } from "element-plus";
+import { ElButton, ElDialog, ElImageViewer, ElMessage, useZIndex } from "element-plus";
 import { IconMaximize } from "@tabler/icons-vue";
 import xSender, { type AnyTagProps, type MentionItem } from "x-sender";
 import "x-sender/lib/XSender.css";
+import type { MaterialMention, ReferenceMention } from "../useNodeReferences";
+import { getPromptText } from "../promptText";
+import promptReferenceMenu from "./promptReferenceMenu.vue";
 
-const props = defineProps<{ references: (MentionItem & { value: string })[]; expandable?: boolean; placeholder?: string }>();
+type Reference = ReferenceMention;
+const props = defineProps<{
+  references: Reference[];
+  materials?: MaterialMention[];
+  selectMaterial?: (id: string) => Promise<Reference | undefined>;
+  selectAsset?: () => Promise<Reference | undefined>;
+  expandable?: boolean;
+  placeholder?: string;
+}>();
 const model = defineModel<AnyTagProps[][]>({ required: true });
 const text = defineModel<string>("text", { default: "" });
 const senderElement = ref<HTMLElement>();
 const expanded = ref(false);
 const expandedTarget = ref<HTMLElement>();
 const { nextZIndex } = useZIndex();
+const mentionMenu = ref<InstanceType<typeof promptReferenceMenu>>();
+const mentionTarget = ref<HTMLElement>();
+const mentionVisible = ref(false);
+const mentionQuery = ref("");
+const mentionAnchor = ref({ left: 0, top: 0, bottom: 0 });
+const mentionZIndex = ref(0);
+const selectingReference = ref(false);
+type MentionCursor = { gridIndex: number; childIndex: number; offset: number; text: string; start: number };
+let mentionCursor: MentionCursor | undefined;
 const previewReferenceId = ref<string>();
-const previewUrl = computed(() => String(props.references.find(item => item.id === previewReferenceId.value)?.avatar ?? ""));
+const previewUrl = computed(() => {
+  const reference = props.references.find(item => item.id === previewReferenceId.value);
+  return reference?.previewable === false ? "" : String(reference?.avatar ?? "");
+});
 let sender: xSender | undefined;
 let resetTask: Promise<void> | undefined;
+
+function closeMentionMenu() {
+  mentionVisible.value = false;
+}
+
+async function dismissMentionMenu() {
+  closeMentionMenu();
+  await nextTick();
+  sender?.focus("mark");
+}
+
+function updateMentionMenu() {
+  const instance = sender;
+  if (!instance || props.materials === undefined || selectingReference.value || instance.chatEditor.isComposition) return;
+  if (document.activeElement && mentionMenu.value?.contains(document.activeElement)) return;
+  const selection = instance.getSelection();
+  const editor = instance.chatElement.richText;
+  if (!selection.isCollapsed || !selection.rangeCount || !editor.contains(selection.focusNode)) return closeMentionMenu();
+  const cursor = instance.getCurrentNode();
+  if (cursor.instance?.type !== "Write") return closeMentionMenu();
+  const before = cursor.instance.text.slice(0, cursor.offset);
+  const start = before.lastIndexOf("@");
+  if (start < 0 || /\s/.test(before.slice(start + 1))) return closeMentionMenu();
+  const gridIndex = instance.chatEditor.NODES.indexOf(cursor.instance.context);
+  const childIndex = cursor.instance.context.children.indexOf(cursor.instance);
+  if (gridIndex < 0 || childIndex < 0) return closeMentionMenu();
+  mentionCursor = { gridIndex, childIndex, offset: cursor.offset, text: cursor.instance.text, start };
+  const range = selection.getRangeAt(0);
+  const rect = range.getClientRects()[0] ?? editor.getBoundingClientRect();
+  mentionAnchor.value = { left: rect.left, top: rect.top, bottom: rect.bottom };
+  mentionQuery.value = before.slice(start + 1);
+  mentionTarget.value = expanded.value && expandedTarget.value ? expandedTarget.value : editor.closest<HTMLElement>(".el-dialog") ?? document.body;
+  if (!mentionVisible.value) mentionZIndex.value = nextZIndex();
+  mentionVisible.value = true;
+}
+
+async function chooseReference(select: () => Reference | undefined | Promise<Reference | undefined>) {
+  const instance = sender;
+  const cursor = mentionCursor;
+  if (!instance || !cursor || selectingReference.value) return;
+  selectingReference.value = true;
+  closeMentionMenu();
+  try {
+    const reference = await select();
+    await nextTick();
+    await instance.nextTick();
+    if (resetTask) await resetTask;
+    if (sender !== instance) return;
+    const current = instance.chatEditor.NODES[cursor.gridIndex]?.children[cursor.childIndex];
+    if (current?.type !== "Write" || current.text !== cursor.text) return;
+    current.focus(cursor.offset);
+    if (!reference) return;
+    const resolved = props.references.find(item => item.id === reference.id);
+    if (!resolved) return;
+    await instance.backspace(cursor.start - cursor.offset);
+    if (sender === instance) await instance.setHtml(referenceHtml(resolved));
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "引用素材失败");
+  } finally {
+    selectingReference.value = false;
+  }
+}
 
 function previewReference(event: MouseEvent) {
   const tag = event.target instanceof Element ? event.target.closest<HTMLElement>(".imageReference[data-reference-id]") : null;
   const reference = props.references.find(item => item.id === tag?.dataset.referenceId);
-  if (!reference?.avatar) return;
+  if (!reference?.avatar || reference.previewable === false) return;
   event.preventDefault();
   event.stopPropagation();
   sender?.bus.emit(xSender.EventSet.EVENT_COMMON_DIALOG_CLOSE);
+  closeMentionMenu();
   previewReferenceId.value = reference.id;
 }
 
-function referenceHtml(reference: MentionItem & { value: string }) {
+function referenceHtml(reference: Reference) {
   const tag = document.createElement("span");
   tag.className = "imageReference";
   tag.dataset.referenceId = reference.id;
   tag.dataset.value = reference.value;
   if (reference.avatar) {
+    if (reference.previewable !== false) tag.classList.add("previewable");
     const image = document.createElement("img");
     image.src = String(reference.avatar);
     image.alt = "";
     image.draggable = false;
     tag.append(image);
   }
-  tag.append(document.createTextNode(reference.name));
+  tag.append(document.createTextNode(reference.label || reference.name));
   return tag.outerHTML;
 }
 
@@ -162,23 +265,6 @@ function updateModel(value: AnyTagProps[][]) {
   text.value = getPromptText(next);
 }
 
-function getPromptText(value: AnyTagProps[][]) {
-  return value.map(line => line.map(tag => {
-    if (tag.type === "Write") return tag.text;
-    if (tag.type === "Input") return tag.text || tag.placeholder;
-    if (tag.type !== "Custom") {
-      const prefix = tag.type === "Mention" ? "@" : tag.type === "Trigger" ? tag.key : "";
-      return prefix + tag.name;
-    }
-    const content = document.createElement("template");
-    content.innerHTML = tag.html;
-    for (const reference of content.content.querySelectorAll<HTMLElement>(".imageReference[data-value]")) {
-      reference.replaceWith(reference.dataset.value ?? "");
-    }
-    return content.content.textContent ?? "";
-  }).join("")).join("\n");
-}
-
 watch(model, (value) => {
   if (sender && JSON.stringify(getStoredModel(value)) !== JSON.stringify(getStoredModel(sender.getModel()))) syncModel(value);
 }, { deep: true });
@@ -187,7 +273,7 @@ watch(() => props.references, async (options) => {
   const instance = sender;
   if (!instance) return;
   instance.bus.emit(xSender.EventSet.EVENT_COMMON_DIALOG_CLOSE);
-  instance.updateConfig({ mentionConfig: { dialogTitle: "选择参考", callEvery: false, options } });
+  if (props.materials === undefined) instance.updateConfig({ mentionConfig: { dialogTitle: "选择参考", callEvery: false, options } });
   // 等库将本帧的输入 DOM 写回模型后再更新参考，避免用旧文本重建输入框。
   await instance.nextTick();
   if (sender === instance) syncModel();
@@ -205,7 +291,8 @@ watch(senderElement, (element, _previous, onCleanup) => {
     placeholder: props.placeholder ?? "描述一下生成风格提示词，输入 @ 引用参考",
     chatStyle: { minHeight: "70px", maxHeight: "180px", fontSize: "14px", lineHeight: "1.6" },
     getPopupContainer: () => popup,
-    mentionConfig: { dialogTitle: "选择参考", callEvery: false, options: props.references },
+    // ACT: XSender 1.4.6 不支持分组候选渲染，扩展引用菜单由 Vue 管理，标签仍走编辑器公开 API。
+    ...(props.materials === undefined ? { mentionConfig: { dialogTitle: "选择参考", callEvery: false, options: props.references } } : {}),
     keyboardSendFun: () => false,
     keyboardWrapFun: event => event.key === "Enter" && !event.isComposing,
   });
@@ -213,6 +300,7 @@ watch(senderElement, (element, _previous, onCleanup) => {
   // ACT: 弹窗只移动现有编辑器，保留参考标签、光标与撤销记录。
   const stopExpandedWatch = watch([expanded, expandedTarget], async ([visible, target]) => {
     instance.bus.emit(xSender.EventSet.EVENT_COMMON_DIALOG_CLOSE);
+    closeMentionMenu();
     instance.updateConfig({ chatStyle: { minHeight: visible ? "100%" : "70px", maxHeight: visible ? "100%" : "180px" } });
     if (!visible || !target) return;
     await nextTick();
@@ -253,7 +341,10 @@ watch(senderElement, (element, _previous, onCleanup) => {
   editor.setAttribute("role", "textbox");
   editor.setAttribute("aria-label", "生成提示词");
   editor.setAttribute("aria-multiline", "true");
-  instance.bus.on("textPrompt", xSender.EventSet.EVENT_COMMON_CHANGE, () => syncModel());
+  instance.bus.on("textPrompt", xSender.EventSet.EVENT_COMMON_CHANGE, () => {
+    syncModel();
+    updateMentionMenu();
+  });
   syncModel(initialModel);
   // ACT: XSender 1.4.6 默认复制标签名称；复用库截取的选区模型，仅覆盖纯文本，保留富文本粘贴。
   const copyText = (event: ClipboardEvent) => {
@@ -262,6 +353,12 @@ watch(senderElement, (element, _previous, onCleanup) => {
   };
   editor.addEventListener("copy", copyText);
   editor.addEventListener("cut", copyText);
+  const updateMentionCursor = (event: KeyboardEvent | MouseEvent) => {
+    if (event instanceof KeyboardEvent && ["Escape", "Enter", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+    void instance.nextTick(() => { if (sender === instance) updateMentionMenu(); });
+  };
+  editor.addEventListener("keyup", updateMentionCursor);
+  editor.addEventListener("click", updateMentionCursor);
   const selectReference = (event: MouseEvent) => {
     const item = (event.target as Element).closest<HTMLElement>(".chat-mention-dialog-item");
     if (!item) return;
@@ -271,8 +368,9 @@ watch(senderElement, (element, _previous, onCleanup) => {
     if (reference) void insertReference(reference);
   };
   const closeOutside = (event: PointerEvent) => {
-    if (!element.contains(event.target as Node) && !popup.contains(event.target as Node)) {
+    if (!element.contains(event.target as Node) && !popup.contains(event.target as Node) && !mentionMenu.value?.contains(event.target as Node)) {
       instance.bus.emit(xSender.EventSet.EVENT_COMMON_DIALOG_CLOSE);
+      closeMentionMenu();
     }
   };
   // ACT: XSender 1.4.6 的候选默认插入 Mention；捕获选择事件改用公开 setHtml，库支持自定义渲染后可替换。
@@ -283,14 +381,17 @@ watch(senderElement, (element, _previous, onCleanup) => {
     updateModel(instance.getModel());
     releaseNodeFocus(instance);
     sender = undefined;
+    closeMentionMenu();
     editor.removeEventListener("copy", copyText);
     editor.removeEventListener("cut", copyText);
+    editor.removeEventListener("keyup", updateMentionCursor);
+    editor.removeEventListener("click", updateMentionCursor);
     document.removeEventListener("pointerdown", closeOutside, true);
     popup.removeEventListener("click", selectReference, true);
     // ACT: 1.4.6 的 destroy 会删除排队回调仍需用到的字段；先走公开清理事件，库修复后可直接 destroy。
     instance.bus.offKeyEvent("textPrompt");
     instance.bus.emit(xSender.EventSet.EVENT_COMMON_DIALOG_CLOSE);
-    instance.updateConfig({ mentionConfig: { dialogTitle: "选择参考", callEvery: false, options: [] } });
+    if (props.materials === undefined) instance.updateConfig({ mentionConfig: { dialogTitle: "选择参考", callEvery: false, options: [] } });
     instance.bus.emit(xSender.EventSet.EVENT_COMMON_DESTROY);
     popup.remove();
   });
@@ -310,6 +411,7 @@ async function insertReference(reference: MentionItem) {
 }
 
 function handleMentionKey(event: KeyboardEvent) {
+  if (mentionVisible.value && mentionMenu.value?.handleKeydown(event)) return;
   if (!sender || event.isComposing || !["ArrowUp", "ArrowDown", "Enter", "Escape"].includes(event.key)) return;
   const dialog = sender.chatElement.dialogRoot.querySelector<HTMLElement>(".chat-mention-dialog-wrap");
   if (!dialog?.getClientRects().length) return;
@@ -414,7 +516,7 @@ function handleMentionKey(event: KeyboardEvent) {
     white-space: nowrap;
     vertical-align: middle;
 
-    &:has(img) {
+    &.previewable {
       cursor: zoom-in;
     }
 

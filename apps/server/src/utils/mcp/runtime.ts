@@ -1,4 +1,5 @@
-import { t } from "@/lib/i18n";
+import { msg, t, translateError } from "@/lib/i18n";
+import { messageError } from "@toonflow/i18n/errors";
 import { once } from "node:events";
 import { existsSync, readFileSync, rmSync, writeAtomicSync } from "@toonflow/file";
 import { createServer, type Server } from "node:http";
@@ -9,7 +10,7 @@ import conf from "@/utils/conf";
 import { getMcpSettings } from "@/utils/mcp/control";
 import { closeMcpServers } from "@/utils/mcp/servers";
 
-let runtime: { app: Express; appOrigin: string; requestHeaders: Record<string, string>; server?: Server; sockets?: Set<Socket>; url?: string; port?: number; preferredPort?: number; file?: string; command: string; entry: string; error?: string } | undefined;
+let runtime: { app: Express; appOrigin: string; requestHeaders: Record<string, string>; server?: Server; sockets?: Set<Socket>; url?: string; port?: number; preferredPort?: number; file?: string; command: string; entry: string; error?: { cause: unknown; keepAddress: boolean } } | undefined;
 let reloadQueue = Promise.resolve();
 
 function removeRuntime(file?: string) {
@@ -98,12 +99,12 @@ export function reloadMcpRuntime() {
         removeRuntime(current.file);
         return;
       }
-      throw new Error(t`MCP 端口 ${preferredPort}–${Math.min(preferredPort + 31, 65535)} 均已占用，请修改首选端口`);
+      throw messageError(msg`MCP 端口 ${preferredPort}–${Math.min(preferredPort + 31, 65535)} 均已占用，请修改首选端口`);
     } catch (error) {
       server.close();
       removeRuntime(file);
-      current.error = `MCP 端口切换失败${current.url ? "，继续使用原地址" : ""}：${error instanceof Error ? error.message : String(error)}`;
-      console.error(current.error);
+      current.error = { cause: error, keepAddress: Boolean(current.url) };
+      console.error("MCP 端口切换失败：", error);
     }
   });
   return reloadQueue;
@@ -116,7 +117,9 @@ export function getMcpRuntime() {
     endpoint: runtime?.url ?? null,
     preferredPort,
     port: runtime?.port ?? null,
-    error: runtime?.error ?? null,
+    error: runtime?.error ? runtime.error.keepAddress
+      ? t`MCP 端口切换失败，继续使用原地址：${translateError(runtime.error.cause)}`
+      : t`MCP 端口切换失败：${translateError(runtime.error.cause)}` : null,
     stdio: runtime?.file && existsSync(runtime.entry)
       ? { command: runtime.command, args: [runtime.entry, "--runtime", runtime.file] }
       : null,

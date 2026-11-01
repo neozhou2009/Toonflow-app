@@ -11,8 +11,49 @@
     @click.stop
     @dblclick.stop
     @contextmenu.stop
-    @keydown.stop>
+    @keydown.stop
+    @keydown.esc.prevent="colorMenuVisible = false">
     <div class="toolbarActions">
+      <el-popover v-if="hasGroup" v-model:visible="colorMenuVisible" trigger="click" placement="bottom-start" :width="274" :showArrow="false" :disabled="busy || disabled">
+        <template #reference>
+          <el-button text class="colorButton" :disabled="busy || disabled" title="分组背景颜色" aria-label="分组背景颜色">
+            <span class="colorPreview" :style="{ background: selectedColors[0]?.value }" />
+          </el-button>
+        </template>
+        <div
+          class="groupColors nodrag nopan nowheel"
+          role="group"
+          aria-label="分组背景颜色"
+          @pointerdown.stop
+          @mousedown.stop
+          @click.stop
+          @dblclick.stop
+          @keydown.stop
+          @keydown.esc.prevent="colorMenuVisible = false">
+          <button
+            v-for="color in colors"
+            :key="color.value"
+            type="button"
+            class="colorSwatch"
+            :style="{ background: color.value }"
+            :title="color.label"
+            :aria-label="color.label"
+            :aria-pressed="selectedColors.every(item => item.value === color.value && item.opacity === 25)"
+            :disabled="busy || disabled"
+            @click="changeGroupColor(color.value)" />
+          <el-color-picker
+            class="customColor"
+            :modelValue="customColor"
+            showAlpha
+            colorFormat="hex"
+            :clearable="false"
+            :teleported="false"
+            :disabled="busy || disabled"
+            title="自定义颜色和透明度"
+            aria-label="自定义分组颜色和透明度"
+            @change="changeGroupColor" />
+        </div>
+      </el-popover>
       <el-button
         v-for="action in layoutActions"
         :key="action.mode"
@@ -29,9 +70,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { getRectOfNodes, useVueFlow, type GraphNode, type Node, type XYPosition } from "@vue-flow/core";
-import { ElButton, ElCard, ElMessage } from "element-plus";
+import { ElButton, ElCard, ElColorPicker, ElMessage, ElPopover } from "element-plus";
 import {
   IconCopyPlus, IconBoxMultiple, IconDeselect,
   IconLayoutGrid, IconLayoutColumns, IconLayoutRows,
@@ -39,6 +80,7 @@ import {
 import { useNodeEvent } from "@toonflow/nodes-scaffold/nodeEvent";
 import { finishGroupDrag, getSelectionRoots, getSelectionTree } from "../selectionNodes";
 import { arrangeSelection, type ArrangeSelectionMode } from "../arrangeSelection";
+import { remapNodeReferences } from "../canvasFiles";
 
 const props = defineProps<{
   batchHistory: (action: () => Promise<void>) => Promise<void>;
@@ -48,6 +90,20 @@ const props = defineProps<{
 const flow = useVueFlow();
 const toolbar = ref<InstanceType<typeof ElCard>>();
 const busy = ref(false);
+const colorMenuVisible = ref(false);
+const colors = [
+  { label: "灰色", value: "#808080" },
+  { label: "红色", value: "#ef4444" },
+  { label: "橙色", value: "#f98b28" },
+  { label: "黄色", value: "#f8bd3e" },
+  { label: "绿色", value: "#2acb70" },
+  { label: "青色", value: "#0db5d0" },
+  { label: "蓝色", value: "#3b82f6" },
+  { label: "紫色", value: "#8b5cf6" },
+  { label: "粉色", value: "#ec399d" },
+  { label: "棕色", value: "#b7794e" },
+  { label: "白色", value: "#e6e6e6" },
+];
 const layoutActions = [
   { mode: "horizontal", label: "水平排列", icon: IconLayoutColumns },
   { mode: "vertical", label: "垂直排列", icon: IconLayoutRows },
@@ -58,9 +114,24 @@ const canArrangeSelection = computed(() => !busy.value && !props.disabled && sel
   && selectionRoots.value.every(node => node.draggable !== false
     && Number.isFinite(node.dimensions.width) && node.dimensions.width > 0
     && Number.isFinite(node.dimensions.height) && node.dimensions.height > 0));
-const hasGroup = computed(() => flow.getSelectedNodes.value.some(node => node.type === "canvasGroup"));
+const selectedGroups = computed(() => flow.getSelectedNodes.value.filter(node => node.type === "canvasGroup"));
+const hasGroup = computed(() => selectedGroups.value.length > 0);
+const selectedColors = computed(() => selectedGroups.value.map(node => {
+  const style = typeof node.style === "function" ? node.style(node) : node.style;
+  return {
+    value: style?.["--groupColor"] ?? colors[0]!.value,
+    opacity: Number.parseFloat(String(style?.["--groupOpacity"] ?? "25%")),
+  };
+}));
+const customColor = computed(() => {
+  const color = selectedColors.value[0];
+  return color ? `${color.value}${Math.round(color.opacity / 100 * 255).toString(16).padStart(2, "0")}` : undefined;
+});
 const visible = computed(() => !props.disabled && !flow.userSelectionActive.value && flow.getSelectedNodes.value.length > 0
   && (flow.nodesSelectionActive.value || hasGroup.value));
+watch(() => visible.value && hasGroup.value, value => {
+  if (!value) colorMenuVisible.value = false;
+});
 const toolbarStyle = computed(() => {
   const bounds = getRectOfNodes(flow.getSelectedNodes.value);
   const { x, y, zoom } = flow.viewport.value;
@@ -71,6 +142,16 @@ const toolbarStyle = computed(() => {
   const top = Math.max(height + 64, Math.min(y + bounds.y * zoom - 12 - (hasGroup.value ? 30 * zoom : 0), flow.dimensions.value.height - 8));
   return { left: `${left}px`, top: `${top}px` };
 });
+
+function changeGroupColor(color: string | null) {
+  if (busy.value || props.disabled || !color) return;
+  const opacity = color.length === 9 ? Math.round(Number.parseInt(color.slice(7), 16) / 255 * 100) : 25;
+  for (const node of selectedGroups.value) {
+    const style = typeof node.style === "function" ? node.style(node) : node.style;
+    flow.updateNode(node.id, { style: { ...style, "--groupColor": color.slice(0, 7), "--groupOpacity": `${opacity}%` } });
+  }
+  colorMenuVisible.value = false;
+}
 
 async function duplicateNodes(selection: GraphNode[], signal: AbortSignal, withEdges = true, positions?: Map<string, XYPosition>) {
   const nodes = getSelectionTree(selection, flow.getNodes.value);
@@ -86,6 +167,7 @@ async function duplicateNodes(selection: GraphNode[], signal: AbortSignal, withE
     signal.throwIfAborted();
     const saved = savedNodes.get(node.id)!;
     const copy = JSON.parse(JSON.stringify({ ...saved, data: { ...saved.data, ...patch } })) as Node;
+    remapNodeReferences(copy, ids);
     Reflect.deleteProperty(copy, "initialized");
     copy.id = ids.get(node.id)!;
     copy.parentNode = ids.get(saved.parentNode ?? "") ?? saved.parentNode;
@@ -321,10 +403,68 @@ defineExpose({ operate, startDragCopy, busy });
       padding: 0 8px;
     }
 
+    .colorButton {
+      width: 28px;
+      padding: 0;
+
+      .colorPreview {
+        width: 18px;
+        height: 18px;
+        border: 1px solid rgb(255 255 255 / 20%);
+        border-radius: 50%;
+      }
+    }
+
     .toolbarDivider {
       height: 16px;
       margin: 0 4px;
       border-left: 1px solid var(--el-border-color-lighter);
+    }
+  }
+}
+
+.groupColors {
+  display: grid;
+  grid-template-columns: repeat(6, 28px);
+  gap: 16px;
+
+  :deep(.customColor) {
+    width: 28px;
+    height: 28px;
+
+    &.is-disabled {
+      opacity: 0.5;
+    }
+
+    .el-color-picker__trigger {
+      padding: 0;
+      border: 1px solid rgb(255 255 255 / 20%);
+      border-radius: 50%;
+      background: radial-gradient(circle at 30% 25%, rgb(255 255 255 / 70%), transparent 60%),
+        conic-gradient(#ef4444, #f8bd3e, #2acb70, #0db5d0, #3b82f6, #8b5cf6, #ec399d, #ef4444);
+    }
+
+    .el-color-picker__color {
+      display: none;
+    }
+  }
+
+  .colorSwatch {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid rgb(255 255 255 / 20%);
+    border-radius: 50%;
+    cursor: pointer;
+
+    &[aria-pressed="true"],
+    &:focus-visible {
+      outline: 2px solid var(--el-text-color-primary);
+      outline-offset: 3px;
+    }
+
+    &:disabled {
+      cursor: not-allowed;
     }
   }
 }

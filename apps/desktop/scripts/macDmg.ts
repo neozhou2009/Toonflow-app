@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "@toonflow/file";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "@toonflow/file";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 export default async function prepareMacDmg() {
   const directory = resolve(import.meta.dir, "../../../build/desktop/macTools");
@@ -21,6 +21,73 @@ async function run(command: string[], input?: string) {
     timeout: command[0] === "/usr/bin/osascript" ? 120000 : 600000,
   });
   if (await child.exited !== 0) throw new Error(`macOS 安装镜像制作失败：${command[0]} ${command[1]}`);
+}
+
+function getDmgDevice(imagePath: string) {
+  const info = Bun.spawnSync(["/usr/bin/hdiutil", "info", "-plist"], {
+    stdin: "ignore", stdout: "pipe", stderr: "inherit", timeout: 30000,
+  });
+  if (info.exitCode !== 0) throw new Error("无法读取已附加的 macOS 镜像。");
+  // ACT: plist 含 NSData，不能整份转 JSON；系统 Foundation 只投影镜像路径与设备名，不引入解析依赖。
+  const projection = Bun.spawnSync(["/usr/bin/osascript", "-l", "JavaScript", "-e", `
+ObjC.import("Foundation");
+const data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
+const plist = $.NSPropertyListSerialization.propertyListWithDataOptionsFormatError(data, 0, null, null);
+if (plist.isNil() || !plist.isKindOfClass($.NSDictionary)) throw new Error("镜像属性列表无效");
+const images = plist.objectForKey("images");
+if (images.isNil() || !images.isKindOfClass($.NSArray)) throw new Error("镜像列表无效");
+const result = [];
+for (let index = 0; index < images.count; index++) {
+  const image = images.objectAtIndex(index);
+  if (image.isNil() || !image.isKindOfClass($.NSDictionary)) throw new Error("镜像记录无效");
+  const path = image.objectForKey("image-path");
+  const entities = image.objectForKey("system-entities");
+  if (path.isNil() || entities.isNil() || !path.isKindOfClass($.NSString) || !entities.isKindOfClass($.NSArray)) throw new Error("镜像信息无效");
+  const devices = [];
+  for (let index = 0; index < entities.count; index++) {
+    const entity = entities.objectAtIndex(index);
+    if (entity.isNil() || !entity.isKindOfClass($.NSDictionary)) throw new Error("镜像设备记录无效");
+    const device = entity.objectForKey("dev-entry");
+    if (device.isNil() || !device.isKindOfClass($.NSString)) throw new Error("镜像设备信息无效");
+    devices.push(ObjC.unwrap(device));
+  }
+  result.push({ imagePath: ObjC.unwrap(path), devices });
+}
+JSON.stringify(result);
+`], { stdin: info.stdout, stdout: "pipe", stderr: "inherit", timeout: 30000 });
+  if (projection.exitCode !== 0) throw new Error("无法解析已附加的 macOS 镜像。");
+  const images = JSON.parse(projection.stdout.toString()) as { imagePath: string; devices: string[] }[];
+  if (!Array.isArray(images) || images.some(image => typeof image?.imagePath !== "string"
+    || !Array.isArray(image.devices) || image.devices.some(device => typeof device !== "string"))) {
+    throw new Error("macOS 镜像信息格式无效。");
+  }
+  const canonicalPath = existsSync(imagePath) ? realpathSync(imagePath) : join(realpathSync(dirname(imagePath)), basename(imagePath));
+  const matches = images.filter(image => image.imagePath === imagePath || image.imagePath === canonicalPath
+    || (existsSync(image.imagePath) && realpathSync(image.imagePath) === canonicalPath));
+  if (matches.length === 0) return;
+  if (matches.length !== 1) throw new Error(`安装镜像对应多个附加记录，拒绝卸载：${imagePath}`);
+  const devices = matches[0]!.devices.filter(device => /^\/dev\/disk\d+$/.test(device));
+  if (devices.length !== 1) throw new Error(`无法确定安装镜像的唯一磁盘设备：${imagePath}`);
+  return devices[0]!;
+}
+
+async function detachDmg(imagePath: string) {
+  // ACT: 卷目录消失不代表镜像脱离；busy 或成功后仍附加时有限重试，间隔合计 10 秒，每次卸载最多 30 秒。
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    const device = getDmgDevice(imagePath);
+    if (!device) return;
+    const child = Bun.spawn(["/usr/bin/hdiutil", "detach", device], {
+      env: { ...process.env, LC_ALL: "C" }, stdin: "ignore", stdout: "inherit", stderr: "pipe", timeout: 30000,
+    });
+    const [exitCode, message] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    process.stderr.write(message);
+    if (!getDmgDevice(imagePath)) return;
+    if ((exitCode !== 0 && !message.includes("Resource busy")) || attempt === 5) {
+      throw new Error(`macOS 安装镜像仍附加（退出码 ${exitCode}）：${imagePath}`);
+    }
+    console.warn(`安装镜像仍附加，${attempt} 秒后重试卸载（${attempt}/4）：${device}`);
+    await Bun.sleep(attempt * 1000);
+  }
 }
 
 async function createDmg(args: string[]) {
@@ -110,19 +177,18 @@ on run args
       update without registering applications
       delay 2
       close
+      delay 1
     end tell
   end tell
 end run
 `);
     if (!existsSync(join(mountPath, ".DS_Store"))) throw new Error("Finder 未保存 macOS 安装引导布局。");
-    await run(["/usr/bin/hdiutil", "detach", mountPath]);
+    await detachDmg(imagePath);
     await run(["/usr/bin/hdiutil", "convert", imagePath, "-format", args[formatIndex + 1]!, "-o", output, "-ov"]);
     console.log(`已添加拖拽安装引导：${basename(output)}`);
   } finally {
-    if (existsSync(mountPath) && statSync(mountPath).dev !== statSync("/Volumes").dev) {
-      try { await run(["/usr/bin/hdiutil", "detach", mountPath]); }
-      catch (error) { throw new Error(`安装镜像未能卸载，已保留临时目录：${temporary}`, { cause: error }); }
-    }
+    try { await detachDmg(imagePath); }
+    catch (error) { throw new Error(`安装镜像未能卸载，已保留临时目录：${temporary}`, { cause: error }); }
     rmSync(temporary, { recursive: true, force: true });
   }
 }

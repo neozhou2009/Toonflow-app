@@ -4,24 +4,56 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { createHash, randomUUID } from "node:crypto";
 import { getAgentImageReference, getOffloadedImageText, readAgentImage, saveAgentImage } from "@/agent/runtime/imageAttachments";
 import type { AgentImageReference } from "@/agent/runtime/imageAttachments";
+import { getAgentTaskId } from "@/agent/runtime/sessions";
 import { getRequestFiles, type RequestFile } from "@/utils/ai/requestFiles";
 import { createFileTransport, FileRequestLimitError } from "@/utils/ai/files";
-import conf from "@/utils/conf";
+import { getConfiguredProviders } from "@/utils/ai";
+import { t } from "@/lib/i18n";
 
 function contentHash(value: unknown) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-export function configureAgentRequests(session: AgentSession, limits?: { maxRequestImageBytes?: number; maxRequestBytes?: number }) {
+export function configureAgentRequests(session: AgentSession, limits?: { maxRequestImageBytes?: number; maxRequestBytes?: number }, runSignal?: AbortSignal, onRetry?: (replyTo?: string) => void) {
   for (const value of Object.values(limits ?? {})) {
     if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) throw new Error("图片请求预算必须为正安全整数");
   }
   const history = session.sessionManager;
   const cwd = history.getCwd();
+  function wakeRetryForSteering() {
+    if (!runSignal?.aborted && session.isRetrying && session.agent.getQueuedMessages().steering.some(message => message.role === "user"
+      || (message.role === "custom" && message.customType === "agentMessage"))) {
+      session.abortRetry();
+    }
+  }
+  let retryMessage: { id: string; replyTo?: string } | undefined;
+  session.subscribe(event => {
+    if (event.type === "queue_update") wakeRetryForSteering();
+    if (event.type === "message_start" && event.message.role === "user") retryMessage = undefined;
+    if (event.type === "auto_retry_start") {
+      const branch = history.getBranch();
+      const entry = branch.findLast(entry => entry.type === "message" && entry.message.role === "assistant");
+      const task = branch.findLast(entry => Boolean(getAgentTaskId(entry)));
+      retryMessage = entry?.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "error"
+        ? { id: entry.id, replyTo: getAgentTaskId(task) } : undefined;
+      // SDK 在通知后才建立退避 controller；已有插话时立即唤醒，避免继续等重试计时。
+      queueMicrotask(wakeRetryForSteering);
+    }
+    if (event.type === "message_start" && event.message.role === "assistant" && event.message.stopReason !== "aborted" && retryMessage) {
+      // ACT: 真正开始下一次生成才替换失败片段；退避期间停止仍保留原回复，原始记录与用量不删除。
+      history.appendCustomEntry("toonflowRetriedMessage", { messageId: retryMessage.id });
+      const { replyTo } = retryMessage;
+      retryMessage = undefined;
+      onRetry?.(replyTo);
+    }
+  });
   const afterToolCall = session.agent.afterToolCall;
   let toolFailure: { error: unknown } | undefined;
   session.agent.afterToolCall = async (call, signal) => {
+    signal = runSignal && signal ? AbortSignal.any([runSignal, signal]) : runSignal ?? signal;
+    if (signal?.aborted && call.isError) return call.result;
     try {
+      signal?.throwIfAborted();
       const observationId = randomUUID();
       const content: (TextContent | ImageContent)[] = [];
       for (const [index, part] of call.result.content.entries()) {
@@ -42,15 +74,22 @@ export function configureAgentRequests(session: AgentSession, limits?: { maxRequ
 
   const streamFunction = session.agent.streamFunction;
   session.agent.streamFunction = (model, context, options) => {
+    const operationSignal = options?.signal;
+    // SDK 压缩后可能创建新 controller；整轮取消仍约束后续摘要、正文和重试请求。
+    const signals = [runSignal, operationSignal].filter((signal): signal is AbortSignal => !!signal);
+    options = { ...options, signal: signals.length ? AbortSignal.any(signals) : undefined };
     const output = createAssistantMessageEventStream();
     void (async () => {
       let partial: AssistantMessage | undefined;
       try {
+        options?.signal?.throwIfAborted();
         if (toolFailure) { const { error } = toolFailure; toolFailure = undefined; throw error; }
-        const providers = conf.get("settings", {}).customProviders;
-        const provider = Array.isArray(providers) ? providers.find(item => item?.id === model.provider) : undefined;
+        const provider = getConfiguredProviders().find(item => item?.id === model.provider);
         const auth = await session.modelRuntime.getAuth(model, { apiKey: options?.apiKey, env: options?.env, signal: options?.signal });
         const apiKey = options?.apiKey ?? auth?.auth.apiKey;
+        if (model.provider.toLowerCase() === "toonflow" && (!provider || provider.apiKey !== apiKey)) {
+          throw new Error("Toonflow 账号已变更，请重新发起请求");
+        }
         const files = createFileTransport({
           apiUrl: auth?.auth.baseUrl ?? model.baseUrl,
           apiKey: apiKey ?? "",
@@ -225,7 +264,7 @@ export function configureAgentRequests(session: AgentSession, limits?: { maxRequ
                 // ACT: 上传后再计内联 base64 与 JSON；文件 ID 不再占用内联预算，超限仍卸载旧观察。
                 if (imageBytes > maxRequestImageBytes || bodyBytes > maxRequestBytes) {
                   if (!offloadBytes(Math.max(imageBytes - maxRequestImageBytes, bodyBytes - maxRequestBytes))) {
-                    throw new Error(`模型请求的非图片内容超过 ${maxRequestBytes} 字节预算，请压缩对话或减少附件内容后重试`);
+                    throw new Error(t`模型请求的非图片内容超过 ${maxRequestBytes} 字节预算，请压缩对话或减少附件内容后重试`);
                   }
                   restart = true;
                 }
@@ -237,18 +276,20 @@ export function configureAgentRequests(session: AgentSession, limits?: { maxRequ
               }
             },
             fetch: Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-              init?.signal?.throwIfAborted();
+              const inputRequest = typeof input === "object" && "url" in input ? input : undefined;
+              const requestSignal = init?.signal === undefined ? inputRequest?.signal : init.signal;
+              const signal = options?.signal && requestSignal ? AbortSignal.any([options.signal, requestSignal]) : options?.signal ?? requestSignal;
+              signal?.throwIfAborted();
               if (typeof init?.body === "string" && Buffer.byteLength(init.body, "utf8") > maxRequestBytes) {
                 try {
                   restart = offloadBytes(Buffer.byteLength(init.body, "utf8") - maxRequestBytes);
-                  if (!restart) fatalError = { error: new Error(`模型请求的非图片内容超过 ${maxRequestBytes} 字节预算，请压缩对话或减少附件内容后重试`) };
+                  if (!restart) fatalError = { error: new Error(t`模型请求的非图片内容超过 ${maxRequestBytes} 字节预算，请压缩对话或减少附件内容后重试`) };
                 } catch (error) { fatalError = { error }; }
                 return new Response(JSON.stringify({ error: { message: "请求超过本地字节限制" } }), {
                   status: 413, headers: { "content-type": "application/json", "x-should-retry": "false" },
                 });
               }
-              // ACT: 工具或用户等待可能让代理关闭空闲连接；每轮重新握手，避免 Bun 复用失效 socket。
-              const response = await request(input, { ...init, keepalive: false });
+              const response = await request(input, { ...init, signal });
               if (response.status !== 413) return response;
               http413 = true;
               const headers = new Headers(response.headers);
@@ -260,10 +301,10 @@ export function configureAgentRequests(session: AgentSession, limits?: { maxRequ
           let start: AssistantMessageEvent | undefined;
           let retry = false;
           for await (const event of stream) {
+            options?.signal?.throwIfAborted();
             if ("partial" in event) partial = event.partial;
             if (event.type === "start") { start = event; continue; }
             if (event.type === "error") {
-              options?.signal?.throwIfAborted();
               if (fatalError) throw fatalError.error;
               const imageBytes = activeImages.reduce((sum, image) => sum + image.file.inlineBytes, 0);
               if (!visible && (restart || (http413 && networkRecoveries < 4
@@ -280,6 +321,7 @@ export function configureAgentRequests(session: AgentSession, limits?: { maxRequ
           }
           if (retry) continue;
           const message = await stream.result();
+          options?.signal?.throwIfAborted();
           if (start) output.push(start);
           output.push(message.stopReason === "error" || message.stopReason === "aborted"
             ? { type: "error", reason: message.stopReason, error: message }
@@ -287,10 +329,11 @@ export function configureAgentRequests(session: AgentSession, limits?: { maxRequ
           return;
         }
       } catch (error) {
+        const reason = runSignal?.aborted ? runSignal.reason : operationSignal?.aborted ? operationSignal.reason : error;
         const message: AssistantMessage = {
           role: "assistant", content: partial?.content ?? [], api: model.api, provider: model.provider, model: model.id,
           stopReason: options?.signal?.aborted ? "aborted" : "error",
-          errorMessage: error instanceof Error ? error.message : String(error),
+          errorMessage: reason instanceof Error ? reason.message : String(reason),
           usage: partial?.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
           timestamp: Date.now(),
         };

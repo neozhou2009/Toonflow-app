@@ -1,6 +1,6 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Rule } from "@form-create/element-ui";
-import type { FfmpegFactory } from "@toonflow/ffmpeg/types";
+import type { BrowserFfmpegRequest, FfmpegFactory, FfmpegRemoteEvent } from "@toonflow/ffmpeg/types";
 import type { Stats } from "@toonflow/file";
 import { z } from "zod";
 
@@ -78,6 +78,7 @@ export interface CanvasContext extends CanvasInfo {
 }
 
 export interface MediaModel {
+  rules?: Rule[];
   supportsPrice?: boolean;
   providerId: string;
   providerLabel: string;
@@ -97,16 +98,23 @@ export interface MediaReference {
   mimeType: string;
 }
 
+/** referenceOrder[0] 对应 {{ref 1}}；媒体 index 为分类数组的零基下标。 */
+export type VideoReference = { type: "image" | "video" | "audio"; index: number }
+  | { type: "firstFrame" | "lastFrame" | "text" };
+
 export interface MediaGenerationRequest {
   providerId: string;
   modelId: string;
   prompt: string;
+  other?: Record<string, unknown>;
   outputDirectory?: string;
   images?: MediaReference[];
   videos?: MediaReference[];
   audios?: MediaReference[];
   firstFrame?: MediaReference;
   lastFrame?: MediaReference;
+  /** 原引用顺序，媒体 index 为分类数组的零基下标。 */
+  referenceOrder?: VideoReference[];
   ratio?: string;
   size?: string;
   resolution?: string;
@@ -183,10 +191,10 @@ export interface SkillContext {
 }
 
 export interface ToolFiles {
-  readFile(path: string, readOnly?: boolean): Promise<Buffer>;
+  readFile(path: string, readOnly?: boolean, options?: { signal?: AbortSignal; maxBytes?: number }): Promise<Buffer>;
   access(path: string, readOnly?: boolean): Promise<void>;
   stat(path: string, readOnly?: boolean): Promise<Stats>;
-  readdir(path: string, readOnly?: boolean): Promise<string[]>;
+  readdir(path: string, readOnly?: boolean, signal?: AbortSignal): Promise<string[]>;
   detectImageMimeType(path: string, readOnly?: boolean): Promise<string | null>;
   writeFile(path: string, content: string | Uint8Array, exclusive?: boolean): Promise<void>;
   mkdir(path: string, recursive?: boolean): Promise<void>;
@@ -201,11 +209,13 @@ export interface ToolContext {
     transcribe(path: string, options?: { lang?: string; signal?: AbortSignal }): Promise<string>;
   };
   assets?: { execute: ToolDefinition["execute"] };
+  sandbox?: { execute: ToolDefinition["execute"] };
   browser?: {
     execute(sessionId: string, args: Record<string, unknown>, config: Record<string, unknown>, signal?: AbortSignal,
       onUpdate?: Parameters<ToolDefinition["execute"]>[3]): ReturnType<ToolDefinition["execute"]>;
   };
   ffmpeg(signal?: AbortSignal): Promise<FfmpegFactory>;
+  executeFfmpeg(request: BrowserFfmpegRequest, emit: (event: FfmpegRemoteEvent) => void, signal?: AbortSignal): Promise<void>;
   media?: MediaContext;
   canvas?: CanvasContext;
   question?: QuestionContext;

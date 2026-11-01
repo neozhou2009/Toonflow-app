@@ -37,7 +37,9 @@
           <chat-item :role="item.role" :variant="item.role === 'user' ? 'base' : 'text'" :textLoading="!!item.streaming && !compacting && !item.parts?.some(part => part.type === 'tool' || part.content)" animation="moving" @vue:updated="measureMessage($event.el?.parentElement ?? null)">
             <template #content>
               <div class="messageContent">
+                <span v-if="item.role === 'user' && item.delivery?.mode === 'steer'" class="steeringLabel" title="当前任务的补充引导，已完成的操作不会撤销"><icon-corner-down-right :size="14" aria-hidden="true" />引导</span>
                 <div v-if="item.report" class="reportHeader"><icon-users-group :size="14" />{{ item.report.name }} 上报</div>
+                <div v-if="item.agentMessage" class="reportHeader"><icon-users-group :size="14" />来自 {{ item.agentMessage.fromName }} 的消息</div>
                 <template v-for="part in item.parts" :key="part.id">
                   <chat-reasoning v-if="part.type === 'thinking' && part.content" class="messageReasoning" :collapsed="part.collapsed ?? true" expandIconPlacement="left" @update:collapsed="part.collapsed = $event">
                     <template #expandIcon><component :is="(part.collapsed ?? true) ? IconChevronRight : IconChevronDown" :size="14" aria-hidden="true" /></template>
@@ -69,7 +71,8 @@
               <template v-if="item.role === 'user'">
                 <el-button class="messageAction" text circle :disabled="locked || remoteRunning" aria-label="编辑消息" title="编辑消息" @click="emit('edit', item)"><icon-pencil :size="14" /></el-button>
               </template>
-              <el-button v-if="!item.report" class="messageAction" text circle :loading="deletingId === item.id" :disabled="locked || remoteRunning" aria-label="删除消息" title="删除消息" @click="emit('delete', item)"><icon-trash v-if="deletingId !== item.id" :size="14" /></el-button>
+              <el-button v-if="!item.report && !item.agentMessage" class="messageAction" text circle :loading="branchingId === item.id" :disabled="locked || remoteRunning || !(item.entryId || item.replyTo)" aria-label="从此消息创建分支" title="从此消息创建分支" @click="emit('branch', item)"><icon-arrow-fork v-if="branchingId !== item.id" :size="14" style="transform: rotate(90deg)" aria-hidden="true" /></el-button>
+              <el-button v-if="!item.report && !item.agentMessage" class="messageAction" text circle :loading="deletingId === item.id" :disabled="locked || remoteRunning" aria-label="删除消息" title="删除消息" @click="emit('delete', item)"><icon-trash v-if="deletingId !== item.id" :size="14" /></el-button>
             </template>
           </div>
           <browserPanel v-if="browserMessages.tools.has(item.id)" class="browserPreview" :tools="browserMessages.tools.get(item.id)!" :directory="directory" :active="active" :live="item.id === browserMessages.liveMessageId" />
@@ -81,9 +84,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch, type ComponentPublicInstance } from "vue";
-import { defaultRangeExtractor, measureElement, observeElementRect, useVirtualizer } from "@tanstack/vue-virtual";
-import { IconArrowDown, IconArrowUpRight, IconAtom, IconChevronDown, IconChevronRight, IconCopy, IconMovie, IconPencil, IconPhoto, IconTrash, IconUsersGroup, IconVector, IconX } from "@tabler/icons-vue";
+import { computed, nextTick, onUpdated, ref, watch, type ComponentPublicInstance } from "vue";
+import { defaultRangeExtractor, observeElementRect, useVirtualizer } from "@tanstack/vue-virtual";
+import { IconArrowDown, IconArrowFork, IconArrowUpRight, IconAtom, IconChevronDown, IconChevronRight, IconCopy, IconCornerDownRight, IconMovie, IconPencil, IconPhoto, IconTrash, IconUsersGroup, IconVector, IconX } from "@tabler/icons-vue";
 import logoUrl from "@toonflow/assets/logo.svg";
 import browserPanel from "@toonflow/tool-browser/panel";
 import { isBrowserTool } from "@toonflow/tool-browser/client";
@@ -99,20 +102,27 @@ import type { AgentMessage } from "../types";
 import "tdesign-vue-next/es/style/index.css";
 import "@tdesign-vue-next/chat/es/style/index.css";
 
-const props = defineProps<{ messages: AgentMessage[]; directory?: string; active: boolean; disabled: boolean; locked: boolean; busy: boolean; remoteRunning: boolean; compacting: boolean; editingId?: string; deletingId?: string; voiceActive: boolean }>();
-const emit = defineEmits<{ fillPrompt: [prompt: string]; copy: [content: string]; edit: [message: AgentMessage]; delete: [message: AgentMessage]; cancelEdit: [] }>();
+const props = defineProps<{ messages: AgentMessage[]; directory?: string; active: boolean; disabled: boolean; locked: boolean; busy: boolean; remoteRunning: boolean; compacting: boolean; editingId?: string; deletingId?: string; branchingId?: string; voiceActive: boolean }>();
+const emit = defineEmits<{ fillPrompt: [prompt: string]; copy: [content: string]; edit: [message: AgentMessage]; branch: [message: AgentMessage]; delete: [message: AgentMessage]; cancelEdit: [] }>();
 const browserMessages = computed(() => {
   const groups = new Map<string, { id: string; tools: AgentToolCall[] }>();
+  const taskIds = new Map<string, string>();
   let turnId: string | undefined;
   let liveMessageId: string | undefined;
   for (const message of props.messages) {
     if (message.role === "user") {
-      turnId = message.entryId ?? message.id;
-      liveMessageId = undefined;
+      const userId = message.entryId ?? message.id;
+      const taskId = message.delivery?.taskMessageId ?? userId;
+      taskIds.set(userId, taskId);
+      if (taskId !== turnId) {
+        turnId = taskId;
+        liveMessageId = undefined;
+      }
       continue;
     }
-    if (message.replyTo && message.replyTo !== turnId) {
-      turnId = message.replyTo;
+    const taskId = message.delivery?.taskMessageId ?? (message.replyTo ? taskIds.get(message.replyTo) ?? message.replyTo : undefined);
+    if (taskId && taskId !== turnId) {
+      turnId = taskId;
       liveMessageId = undefined;
     }
     const tools = message.parts?.flatMap(part => part.type === "tool" && isBrowserTool(part.tool) ? [part.tool] : []);
@@ -126,7 +136,7 @@ const browserMessages = computed(() => {
   return { tools: new Map([...groups.values()].map(group => [group.id, group.tools])), liveMessageId };
 });
 // 同轮浏览器调用共用该轮首条浏览器消息底部的画面，原始工具记录仍完整保留。
-const displayedMessages = computed(() => props.messages.filter(message => browserMessages.value.tools.has(message.id) || message.role === "user" || message.error || message.report || message.attachments?.length ||
+const displayedMessages = computed(() => props.messages.filter(message => browserMessages.value.tools.has(message.id) || message.role === "user" || message.error || message.report || message.agentMessage || message.attachments?.length ||
   !message.parts?.length || message.parts.some(part => part.type !== "tool" || !isBrowserTool(part.tool))));
 const messageList = ref<HTMLDivElement>();
 const atLatestMessage = ref(true);
@@ -148,10 +158,13 @@ const messageVirtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>(comput
     anchorTo: "end" as const,
     followOnAppend: true,
     scrollEndThreshold: 48,
-    useAnimationFrameWithResizeObserver: true,
-    useCachedMeasurements: !props.active,
-    // ACT: 实时行读取当前高度，避免延后执行的观察记录覆盖本轮同步测量；历史行仍使用缓存。
-    measureElement: (element, entry, instance) => props.active && element.dataset.liveMessage ? element.offsetHeight : measureElement(element, entry, instance),
+    measureElement: (element, _entry, instance) => {
+      const height = props.active ? element.offsetHeight : 0;
+      if (height) return height;
+      // active 先于祖先 v-show 恢复；隐藏时不能把零高度写入缓存。
+      const index = instance.indexFromElement(element);
+      return instance.itemSizeCache.get(instance.options.getItemKey(index)) ?? instance.options.estimateSize(index);
+    },
     // ACT: v-show 隐藏时保留视口与行高，避免零尺寸清空正在输入的工具表单。
     observeElementRect: (instance, onChange) => observeElementRect(instance, rect => { if (rect.height) onChange(rect); }),
     rangeExtractor: range => [...new Set([...defaultRangeExtractor(range), ...retained])].sort((left, right) => left - right),
@@ -163,11 +176,13 @@ const messageVirtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>(comput
   };
 }));
 const visibleMessages = computed(() => messageVirtualizer.value.getVirtualItems().map(row => ({ row, item: displayedMessages.value[row.index]! })));
+// Vue 适配层未在尺寸更新后调用此钩子；占位高度提交后补偿被浏览器截断的滚动。
+onUpdated(() => messageVirtualizer.value._willUpdate());
 let messageMeasurePending = false;
 
 function measureMessage(element: Element | ComponentPublicInstance | null) {
   const instance = messageVirtualizer.value;
-  if (!(element instanceof HTMLDivElement) || !props.active || !atLatestMessage.value || !element.dataset.liveMessage) {
+  if (!(element instanceof HTMLDivElement) || !props.active || !element.offsetHeight || !atLatestMessage.value || !element.dataset.liveMessage) {
     instance.measureElement(element instanceof HTMLDivElement ? element : null);
     return;
   }
@@ -175,7 +190,7 @@ function measureMessage(element: Element | ComponentPublicInstance | null) {
   const height = element.offsetHeight;
   const changed = instance.itemSizeCache.get(instance.options.getItemKey(index)) !== height;
   instance.measureElement(element);
-  // 自动滚动时库会跳过同步测量；在本次 DOM 提交内校正，避免画面随换行先下移再被拉回。
+  // 滚动期间库可能跳过同步测量；在本次 DOM 提交内校正，避免画面随换行先下移再被拉回。
   instance.resizeItem(index, height);
   if (!changed || messageMeasurePending) return;
   messageMeasurePending = true;
@@ -300,6 +315,15 @@ const welcomeSuggestions = [
       box-sizing: border-box;
       padding: 0 12px 12px;
 
+      @media (hover: hover) {
+        &:not(:hover):not(:has(:focus-visible)) {
+          .messageActions {
+            opacity: 0;
+            pointer-events: none;
+          }
+        }
+      }
+
       .messageActions {
         display: flex;
         align-items: center;
@@ -366,6 +390,16 @@ const welcomeSuggestions = [
       min-width: 0;
       overflow-wrap: anywhere;
       color: var(--el-text-color-primary);
+
+      .steeringLabel {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        align-self: flex-start;
+        color: var(--el-text-color-secondary);
+        font-size: 12px;
+        line-height: 18px;
+      }
 
       .messageReasoning {
         padding-top: 0;

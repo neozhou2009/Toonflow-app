@@ -1,4 +1,4 @@
-import { Updater, Utils } from "electrobun/bun";
+import Electrobun, { Updater, Utils } from "electrobun/bun";
 import { execFile, spawn } from "node:child_process";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -286,14 +286,30 @@ const updater = {
         }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
-      // UTC 判断暂停过期，单调时钟防系统时间回拨；两种期限都必须留下完整退出时间。
-      if (!restart.pid || restart.exitCode !== null || restart.signalCode !== null || Date.now() + 5000 >= quitDeadline
-        || performance.now() + 5000 >= quitMonotonicDeadline
-        || readSmallFile(readyPath).trim() !== readyValue) throw new Error("更新交接已失效，已保留旧版本，请重试。");
-      process.kill(restart.pid, 0);
+      function ensureUpdateHandoff() {
+        // UTC 判断暂停过期，单调时钟防系统时间回拨；两种期限都必须留下完整退出时间。
+        if (!restart?.pid || restart.exitCode !== null || restart.signalCode !== null || Date.now() + 5000 >= quitDeadline
+          || performance.now() + 5000 >= quitMonotonicDeadline
+          || readSmallFile(readyPath).trim() !== readyValue) throw new Error("更新交接已失效，已保留旧版本，请重试。");
+        process.kill(restart.pid, 0);
+      }
+      ensureUpdateHandoff();
       restart.unref();
+      let quitError: unknown;
+      const verifyQuit = (event: { response?: { allow: boolean } }) => {
+        if (event.response?.allow === false) return;
+        try { ensureUpdateHandoff(); }
+        catch (error) {
+          event.response = { allow: false };
+          quitError = error;
+        }
+      };
+      // ACT: 1.18.1 没有两阶段批准；尾部监听在退出确认弹窗返回后复查助手，避免等待弹窗耗尽交接时间。
+      Electrobun.events.on("before-quit", verifyQuit);
+      try { Utils.quit(); }
+      finally { Electrobun.events.removeListener("before-quit", verifyQuit); }
       // 1.18.1 成功退出不会返回；若被取消，helper 尚未换包，取消放行即可。
-      Utils.quit();
+      if (quitError) throw quitError;
       throw new Error("更新重启已取消，已保留旧版本。");
     } catch (error) {
       prepared = undefined;

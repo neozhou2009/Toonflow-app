@@ -21,6 +21,7 @@
 </template>
 
 <script setup lang="ts">
+import { translate } from "@toonflow/i18n/vue";
 import axios from "axios";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -57,7 +58,7 @@ onMounted(async () => {
 });
 
 function errorMessage(cause: unknown) {
-  return axios.isAxiosError(cause) ? cause.response?.data?.message || cause.message : cause instanceof Error ? cause.message : "操作失败";
+  return axios.isAxiosError(cause) ? cause.response?.data?.message || cause.message : cause instanceof Error ? cause.message : translate("操作失败");
 }
 
 function selectFile(path: string) {

@@ -8,6 +8,7 @@ import { configureAgentRequests } from "@/agent/runtime/requests";
 export type SubAgentModel = Pick<CreateAgentSessionOptions, "modelRuntime" | "model" | "thinkingLevel">;
 export type SubAgentResult = {
   name: string;
+  file?: string;
   status: "running" | "completed" | "error" | "limited" | "cancelled" | "inputRequired";
   result: string;
   taskId?: string;
@@ -48,15 +49,16 @@ export async function runSubAgent(options: SubAgentModel & {
     const activeTools = tools.map(tool => ({
       ...tool,
       async execute(...args: Parameters<ToolDefinition["execute"]>) {
-        signal.throwIfAborted();
+        const toolSignal = args[2] ? AbortSignal.any([signal, args[2]]) : signal;
+        toolSignal.throwIfAborted();
         // ACT: SDK 在整批工具结束后才停轮；提出问题后不再执行本批后续操作。
         if (inputRequired?.()) throw new Error("任务正在等待调用方补充输入，不能继续执行工具");
-        if (tool.name !== "askUser" || !onTool) return tool.execute(...args);
+        if (tool.name !== "askUser" || !onTool) return tool.execute(args[0], args[1], toolSignal, args[3], args[4]);
         // 子会话的模型调用 ID 可能重复，提问卡片与回答通道使用独立 ID。
         const id = crypto.randomUUID();
         onTool({ id, name: tool.name, args: args[1] as Record<string, unknown>, status: "running" });
         try {
-          const output = await tool.execute(id, args[1], args[2], args[3], args[4]);
+          const output = await tool.execute(id, args[1], toolSignal, args[3], args[4]);
           onTool({ id, name: tool.name, status: "success", result: output.content.filter(part => part.type === "text").map(part => part.text).join("\n") });
           return output;
         } catch (error) {
@@ -67,7 +69,8 @@ export async function runSubAgent(options: SubAgentModel & {
     }));
     const resources = await createAgentResources(cwd, activeTools, SettingsManager.inMemory({
       compaction: { enabled: false },
-      retry: { enabled: false, provider: { maxRetries: 0 } },
+      // 复用 SDK 的轮次重试，覆盖响应头之后的断流；不叠加供应商层重试。
+      retry: { enabled: true, maxRetries: 3, baseDelayMs: 2000, provider: { maxRetries: 0 } },
     }), instructions);
     signal.throwIfAborted();
     ({ session } = await createAgentSession({
@@ -76,7 +79,7 @@ export async function runSubAgent(options: SubAgentModel & {
       customTools: activeTools,
       tools: activeTools.map(tool => tool.name),
     }));
-    configureAgentRequests(session);
+    configureAgentRequests(session, undefined, signal);
     signal.throwIfAborted();
     session.agent.shouldStopAfterTurn = () => Boolean(inputRequired?.());
     session.subscribe(event => {

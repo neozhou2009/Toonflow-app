@@ -91,7 +91,7 @@ import useWorkspaceFiles from "@/lib/workspaceFiles";
 import { settingsStorage } from "@/stores/settings";
 import { writeClipboardText } from "@/lib/clipboard";
 import { isMobile, isRemoteConnection } from "@/lib/platform";
-import { t } from "@toonflow/i18n/vue";
+import { t, translate } from "@toonflow/i18n/vue";
 import { isCanvasFile } from "@/pages/workspace/canvasFile";
 import { extensionCandidates, extensionIcon, listExtensions } from "../extensions";
 import { getNodeIcon } from "../../canvas/loadNodeComponent";
@@ -162,7 +162,7 @@ let locatingKey: string | undefined;
 const assetNodes = new Map<AbortSignal, Promise<Map<string, DocumentNode[]>>>();
 let treeController = new AbortController();
 const busy = ref(false);
-const rootItem = computed<FileTreeItem>(() => ({ key: "root", name: directory.value?.split(/[\\/]/).filter(Boolean).at(-1) ?? "工作区", path: "", type: "directory" }));
+const rootItem = computed<FileTreeItem>(() => ({ key: "root", name: directory.value?.split(/[\\/]/).filter(Boolean).at(-1) ?? translate("工作区"), path: "", type: "directory" }));
 const expandedSet = computed(() => new Set(expandedKeys.value));
 const checkedKeys = computed(() => new Set(checkedItems.value.map(item => item.key)));
 const treeRows = computed<TreeRow[]>(() => {
@@ -411,7 +411,7 @@ function childPath(parent: string, name: string) { return parent ? `${parent}/${
 
 async function executeFileAction(action: FileAction, item: FileTreeItem, target?: string) {
   const execute = props.params?.params.executeFileAction;
-  if (!execute) throw new Error("文件操作宿主尚未就绪");
+  if (!execute) throw new Error("文件操作宿主尚未就绪，暂时无法操作文件，请稍后重试。");
   await execute(action, item, target);
 }
 
@@ -517,7 +517,7 @@ async function handleCommand(command: string, item = menuItem.value, source = cl
     if (total > 1) ElMessage.success(`已完成 ${completed} / ${total} 项`);
   } catch (error) {
     if (total > 1 && error !== "cancel" && error !== "close") {
-      const message = axios.isAxiosError<{ message?: string }>(error) ? error.response?.data?.message : error instanceof Error ? error.message : "文件操作失败";
+      const message = axios.isAxiosError<{ message?: string }>(error) ? error.response?.data?.message : error instanceof Error ? error.message : translate("文件操作失败");
       ElMessage.error(`已完成 ${completed} / ${total} 项，剩余未执行：${message}`);
     } else showActionError(error);
   } finally { busy.value = false; if (changed && currentDirectory === directory.value) refreshTree(); }

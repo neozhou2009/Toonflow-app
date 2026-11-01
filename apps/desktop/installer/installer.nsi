@@ -7,6 +7,18 @@ ManifestDPIAware true
 SetFont "Microsoft YaHei UI" 9
 
 !define appName "Toonflow"
+VIProductVersion "${appVersion}.0"
+VIFileVersion "${appVersion}.0"
+VIAddVersionKey /LANG=2052 "ProductName" "${appName}"
+VIAddVersionKey /LANG=2052 "CompanyName" "HBAI-Ltd"
+VIAddVersionKey /LANG=2052 "FileDescription" "Toonflow 安装程序"
+VIAddVersionKey /LANG=2052 "FileVersion" "${appVersion}.0"
+VIAddVersionKey /LANG=2052 "ProductVersion" "${appVersion}"
+VIAddVersionKey /LANG=2052 "LegalCopyright" "Copyright (c) HBAI-Ltd"
+; ACT: 编译时签署内嵌卸载器；不运行安装包来提取卸载器，签名失败即停止。
+!ifdef windowsSignCommand
+  !uninstfinalize '${windowsSignCommand} "%1"' = 0
+!endif
 !define uninstallKey "Software\Microsoft\Windows\CurrentVersion\Uninstall\${appIdentifier}.stable"
 Var removeUserData
 Var removeUserDataCheckbox
@@ -132,14 +144,22 @@ Section "Install"
   ${EndIf}
 
 installApp:
-  ; NSIS 是 x86，Sysnative 指向系统 x64 tar，避免重定向到 SysWOW64。
-  IfFileExists "$WINDIR\Sysnative\tar.exe" tarReady 0
-    MessageBox MB_OK|MB_ICONSTOP "未找到 Windows 系统 tar.exe，无法解压应用，请更新 Windows 后重试。" /SD IDOK
-    SetErrorLevel 2
-    Abort
-tarReady:
   Call ensureWebView2
   !insertmacro ensureAppStopped "安装"
+  ClearErrors
+  StrCpy $installStep "准备应用解压工具"
+  File "/oname=$PLUGINSDIR\updateHelper.exe" "${updateHelper}"
+  IfErrors installFailed
+  DetailPrint "正在检查解压工具，缺失时将从 7-Zip 官方下载。"
+  nsExec::ExecToStack /TIMEOUT=720000 '"$PLUGINSDIR\updateHelper.exe" --ensure-archive-tool "$INSTDIR" --quiet --utf16'
+  Pop $0
+  Pop $1
+  ${If} $0 != 0
+    DetailPrint "解压工具准备失败，返回码：$0；$1"
+    MessageBox MB_OK|MB_ICONSTOP "无法准备应用解压工具，请确认网络和目录权限后重试。$\r$\n$1" /SD IDOK
+    SetErrorLevel 2
+    Abort
+  ${EndIf}
   ClearErrors
   StrCpy $installStep "创建应用目录"
   SetOutPath "$INSTDIR\app"
@@ -168,7 +188,7 @@ tarReady:
     RMDir /r "$INSTDIR\app\Resources\app\providers"
   IfErrors installFailed
   ; ACT: 仅打包一份 tar，释放应用后保留原文件作为增量更新基线。
-  nsExec::ExecToStack '"$WINDIR\Sysnative\tar.exe" -xf "$INSTDIR\self-extraction\${appHash}.tar" -C "$INSTDIR\app" --strip-components=1'
+  nsExec::ExecToStack '"$PLUGINSDIR\updateHelper.exe" --extract-install "$INSTDIR" "$INSTDIR\self-extraction\${appHash}.tar" --quiet --utf16'
   Pop $0
   Pop $1
   ${If} $0 != 0
@@ -245,6 +265,12 @@ Section "Uninstall"
   RMDir /r "$INSTDIR\app"
   IfErrors uninstallFailed
   RMDir /r "$INSTDIR\self-extraction"
+  IfFileExists "$INSTDIR\runtime\sevenZip\*.*" 0 +2
+    RMDir /r "$INSTDIR\runtime\sevenZip"
+  IfErrors uninstallFailed
+  ; ACT: runtime 可能还有其他运行时，只尝试删除已清空的父目录。
+  RMDir "$INSTDIR\runtime"
+  ClearErrors
   Delete "$INSTDIR\uninstall.exe"
   Delete "$INSTDIR\.electrobun-uninstall.json"
   Delete "$INSTDIR\.electrobun-update-*.json"

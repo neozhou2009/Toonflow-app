@@ -336,7 +336,7 @@ watch(
   height: 100%;
   border: 1px solid var(--el-border-color);
   border-radius: var(--el-border-radius-base);
-  background: color-mix(in srgb, var(--el-fill-color-light) 25%, transparent);
+  background: color-mix(in srgb, var(--groupColor, var(--el-fill-color-light)) var(--groupOpacity, 25%), transparent);
 
   &.selected {
     border-color: color-mix(in srgb, var(--el-color-primary) 50%, var(--el-border-color));

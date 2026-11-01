@@ -30,8 +30,9 @@ export const mkdtempSync = native.mkdtempSync;
 export const readFile: typeof promises.readFile = ((path: native.PathLike | promises.FileHandle, options: any) =>
   typeof path === "object" && "fd" in path ? promises.readFile(path, options)
     : withFileAccess([path as native.PathLike], openKind(options?.flag ?? "r"), () => promises.readFile(path, options), options?.signal)) as typeof promises.readFile;
-export const readdir: typeof promises.readdir = ((path: native.PathLike, options: any) =>
-  withFileAccess([path], "read", () => promises.readdir(path, options))) as typeof promises.readdir;
+export const readdir = ((path: native.PathLike, options: any) =>
+  withFileAccess([path], "read", () => promises.readdir(path, options), options?.signal)) as typeof promises.readdir
+  & ((path: native.PathLike, options: { signal?: AbortSignal }) => Promise<string[]>);
 export const writeFile: typeof promises.writeFile = ((path: native.PathLike | promises.FileHandle, data: any, options: any) =>
   typeof path === "object" && "fd" in path ? promises.writeFile(path, data, options)
     : withFileAccess([path as native.PathLike], "write", () => promises.writeFile(path, data, options), options?.signal)) as typeof promises.writeFile;

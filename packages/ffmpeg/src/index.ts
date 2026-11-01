@@ -8,10 +8,12 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { builds, downloadSources } from "./catalog";
+import { readVersionInWorker } from "./workerClient";
 
 export { createFfmpeg } from "./runtime";
 export { executeRemoteFfmpeg } from "./remote";
-export type { BrowserFfmpegRequest } from "./browserTypes";
+export { executeFfmpegInWorker, readVersionInWorker } from "./workerClient";
+export type { BrowserFfmpegRequest, FfmpegRemoteEvent } from "./browserTypes";
 export type * from "./types";
 export { downloadSources };
 export type SourceId = typeof downloadSources[number]["id"];
@@ -34,18 +36,6 @@ function executableName(name: string) {
   return process.platform === "win32" ? `${name}.exe` : name;
 }
 
-async function readVersion(path: string, name: string, signal?: AbortSignal) {
-  const child = Bun.spawn([path, "-version"], {
-    stdin: "ignore", stdout: "pipe", stderr: "ignore", windowsHide: true, timeout: 15000, signal,
-    env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "FFREPORT")),
-  });
-  const [output, code] = await Promise.all([child.stdout.text(), child.exited]);
-  signal?.throwIfAborted();
-  const version = output.split(/\r?\n/, 1)[0];
-  if (code !== 0 || !version?.startsWith(`${name} version `)) throw messageError(msg`${name} 无法运行，请检查平台兼容性或重新下载`);
-  return version;
-}
-
 export async function getToolStatus(directory: string, mode: FfmpegMode, formatError = (error: unknown) => error instanceof Error ? error.message : String(error)) {
   const entries = await Promise.all(toolNames.map(async (name) => {
     const downloaded = join(directory, executableName(name));
@@ -53,7 +43,7 @@ export async function getToolStatus(directory: string, mode: FfmpegMode, formatE
     const path = hasDownload ? downloaded : mode === "download" ? null : Bun.which(executableName(name));
     const origin = path ? hasDownload ? "download" as const : "system" as const : null;
     try {
-      return [name, { path, origin, version: path ? await readVersion(path, name) : null, error: path ? null : "未找到可用程序" }] as const;
+      return [name, { path, origin, version: path ? await readVersionInWorker(path, name) : null, error: path ? null : "未找到可用程序" }] as const;
     } catch (error) {
       return [name, { path, origin, version: null, error: formatError(error) }] as const;
     }
@@ -118,7 +108,7 @@ export async function installFfmpeg(directory: string, sourceId: SourceId, signa
         },
       }), createWriteStream(binary, { flags: "wx", signal }), { signal });
       if (process.platform !== "win32") await chmod(binary, 0o755);
-      await readVersion(binary, name, signal);
+      await readVersionInWorker(binary, name, signal);
     }
     signal.throwIfAborted();
     // ACT: 两个程序验证完毕再整体替换；提交开始后不响应取消，避免留下半套程序。

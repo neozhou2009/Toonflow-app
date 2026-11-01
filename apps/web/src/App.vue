@@ -8,6 +8,7 @@
       </router-view>
       <loadingPage v-model:visible="workspaceStore.projectLoadingVisible" v-model:drawn="workspaceStore.projectLoadingDrawn" :active="workspaceStore.projectLoading" />
       <ffmpegRequired />
+      <desktopQuit v-if="actualPlatform.isDesktop" />
       <updateBox
         v-if="updateBoxBuild && !installFailure"
         v-model="updateBoxVisible"
@@ -54,13 +55,14 @@ import tdesignAr from "tdesign-vue-next/es/locale/ar_KW";
 import { locale } from "@toonflow/i18n/vue";
 import type { updateSnapshot } from "@toonflow/server/desktop";
 import { chatLocale } from "@/lib/i18n";
-import { isMobile, isDesktop } from "@/lib/platform";
+import { actualPlatform, isMobile } from "@/lib/platform";
 import { saveSettings, settings, uiSettings } from "@/stores/settings";
 import { desktopUpdateSnapshot, stopDesktopUpdateObservation } from "@/stores/desktopUpdate";
 import { useWorkspaceStore } from "@/stores/workspace";
 import loadingPage from "@/components/loadingPage.vue";
 import { useMcpControl } from "@/lib/mcpControl";
 import ffmpegRequired from "@/components/settings/ffmpegRequired.vue";
+import desktopQuit from "@/components/desktopQuit.vue";
 import updateBox from "@/components/updateBox.vue";
 import "element-plus/theme-chalk/dark/css-vars.css";
 
@@ -84,7 +86,7 @@ const installFailure = shallowRef<updateSnapshot["installFailure"]>();
 const shownInstallAttempts = new Set<string>();
 
 watch(desktopUpdateSnapshot, snapshot => {
-  if (!isDesktop || !snapshot) return;
+  if (!actualPlatform.isDesktop || !snapshot) return;
   if (snapshot.installFailure) {
     installFailure.value = snapshot.installFailure;
     updateBoxVisible.value = false;
@@ -145,8 +147,9 @@ watchEffect(() => document.documentElement.style.setProperty("--markdown-tooltip
 
 watchEffect(() => {
   if (!isMobile) return;
-  // ACT: 使用 WebView 视口缩放，保持画布触摸坐标和弹出层在同一坐标系。
-  document.querySelector('meta[name="viewport"]')?.setAttribute("content", `width=device-width, initial-scale=${uiSettings.value.mobileScale / 100}`);
+  const scale = uiSettings.value.mobileScale / 100;
+  // ACT: 移动端视口比例由设置统一控制，避免输入聚焦自动放大后无法还原；画布仍由 Vue Flow 缩放。
+  document.querySelector('meta[name="viewport"]')?.setAttribute("content", `width=device-width, initial-scale=${scale}, minimum-scale=${scale}, maximum-scale=${scale}, user-scalable=no`);
 });
 
 const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");

@@ -3,6 +3,8 @@ import { file } from "@toonflow/file/bun";
 import type { Request } from "express";
 import conf from "@/utils/conf";
 import type { DesktopRuntime, desktopUpdateAttempt, updateSnapshot } from "@/types/desktop";
+import { msg, translateError, translateMessage } from "@/lib/i18n";
+import { messageError } from "@toonflow/i18n/errors";
 
 const updateBaseUrls = {
   official: "https://api.toonflow.net/web/version/desktopUpdates",
@@ -58,7 +60,7 @@ function getInstallFailure(local: Awaited<ReturnType<DesktopRuntime["updater"]["
     targetHash: attempt.targetHash,
     currentVersion: local.version,
     currentHash: local.hash,
-    message,
+    message: translateMessage(message),
     downloadUrl: "https://github.com/HBAI-Ltd/Toonflow-app/releases/latest",
   };
 }
@@ -69,7 +71,7 @@ interface DesktopState {
   downloadingUpdate: boolean;
   applyingUpdate: boolean;
   updateHandoffComplete?: boolean;
-  updateError: string;
+  updateError: string | Error;
   updateProgress?: updateSnapshot["updateProgress"];
   checkedBaseUrl?: string;
   lastBaseUrl?: string;
@@ -106,7 +108,7 @@ async function assertUpdateVersion(updater: DesktopRuntime["updater"], state: De
   const local = await updater.getLocalInfo();
   if (Bun.semver.order(version, local.version) >= 0) return;
   state.checkedBaseUrl = undefined;
-  throw new Error(`更新源版本 ${version} 早于当前版本 ${local.version}，已阻止降级`);
+  throw messageError(msg`更新源版本 ${version} 早于当前版本 ${local.version}，已阻止降级`);
 }
 
 function getDesktopState(req: Request): DesktopState {
@@ -153,7 +155,7 @@ export async function getDesktopUpdate(req: Request): Promise<updateSnapshot> {
     version, channel, hash,
     latestVersion: validUpdate ? update?.version || "" : "",
     latestHash: validUpdate ? update?.hash || "" : "",
-    error,
+    error: translateError(error),
     installFailure,
     updateAvailable: !installFailure && validUpdate && (update?.updateAvailable ?? false),
     updateReady: !installFailure && validUpdate && (update?.updateReady ?? false),
@@ -180,7 +182,7 @@ export async function checkDesktopUpdate(req: Request): Promise<void> {
       state.checkedBaseUrl = updateBaseUrl;
     }
   } catch (error) {
-    state.updateError = String(error);
+    state.updateError = error instanceof Error ? error : String(error);
   } finally {
     state.checkingUpdate = false;
   }
@@ -222,7 +224,7 @@ export async function downloadDesktopUpdate(req: Request): Promise<void> {
     if (update?.error || !update?.updateReady) throw new Error(update?.error || "更新包尚未准备完成，请重试。");
     await assertUpdateVersion(updater, state);
   } catch (error) {
-    state.updateError = error instanceof Error ? error.message : String(error);
+    state.updateError = error instanceof Error ? error : String(error);
     throw error;
   } finally {
     state.downloadingUpdate = false;
@@ -261,7 +263,7 @@ export async function applyDesktopUpdate(req: Request): Promise<void> {
     state.updateHandoffComplete = true;
     // ACT: 成功后宿主即将退出，保持互斥直到进程结束。
   } catch (error) {
-    state.updateError = error instanceof Error ? error.message : String(error);
+    state.updateError = error instanceof Error ? error : String(error);
     // 交接未完成或用户取消时没有发生重启，不留下虚假的重启失败记录。
     if (attempt) {
       cancelledUpdateAttempt = attempt.attemptId;

@@ -36,8 +36,7 @@ export default function createWindowsUpdater(resourcesDirectory: string, lifecyc
   const extractionDirectory = join(installDirectory, "self-extraction");
   const preparedPath = join(extractionDirectory, "preparedUpdate.json");
   const resultPath = join(extractionDirectory, "updateResult.json");
-  // ACT: Electrobun 在 Worker 中加载应用，环境变量区分大小写，不能只读取 WINDIR。
-  const tarExecutable = join(process.env.SystemRoot ?? process.env.windir ?? process.env.WINDIR!, "System32", "tar.exe");
+  const updateHelperPath = join(resourcesDirectory, "app/updateHelper.exe");
   let localInfo: versionInfo;
   let manifest: { version: string; hash: string; artifact: { file: string } } | undefined;
   let busy = false;
@@ -191,8 +190,12 @@ export default function createWindowsUpdater(resourcesDirectory: string, lifecyc
     return state;
   }
 
+  async function ensureArchiveTool() {
+    await execFileAsync(updateHelperPath, ["--ensure-archive-tool", installDirectory, "--quiet"], { windowsHide: true, timeout: 12 * 60_000, maxBuffer: 65536 });
+  }
+
   async function readArchiveInfo(path: string): Promise<versionInfo> {
-    const { stdout } = await execFileAsync(tarExecutable, ["-xOf", path, `${localInfo.name}/Resources/version.json`], { windowsHide: true, timeout: 60000, maxBuffer: 65536 });
+    const { stdout } = await execFileAsync(updateHelperPath, ["--read-archive-info", installDirectory, path, `${localInfo.name}/Resources/version.json`, "--quiet"], { windowsHide: true, timeout: 75000, maxBuffer: 65536 });
     const info = JSON.parse(stdout);
     if (!info || info.identifier !== localInfo.identifier || info.channel !== localInfo.channel || typeof info.hash !== "string" || !hashPattern.test(info.hash)
       || typeof info.version !== "string" || !versionPattern.test(info.version)) throw new Error(t`更新包安装标识不匹配`);
@@ -235,6 +238,7 @@ export default function createWindowsUpdater(resourcesDirectory: string, lifecyc
     const temporaryFile = (suffix: string) => { const path = join(extractionDirectory, `${randomUUID()}${suffix}`); temporaryFiles.push(path); return path; };
     try {
       ensureDirectory();
+      await ensureArchiveTool();
       const target = manifest;
       let archivePath = join(extractionDirectory, `${localInfo.hash}.tar`);
       let currentHash = localInfo.hash;
@@ -301,10 +305,12 @@ export default function createWindowsUpdater(resourcesDirectory: string, lifecyc
     let approval: unknown;
     let helperStarted = false;
     try {
+      // ACT: 解压工具缺失时在申请退出前下载，不占用助手的 120 秒交接窗口。
+      await ensureArchiveTool();
       approval = lifecycle.requestQuitApproval();
       if (!approval) throw new Error(t`更新重启已取消`);
       installError = "";
-      copyFileSync(join(resourcesDirectory, "app/updateHelper.exe"), helperPath);
+      copyFileSync(updateHelperPath, helperPath);
       // 等待最外层启动入口退出，确保兼容启动的监控进程也已释放 app 目录。
       const parentPid = [process.env.TOONFLOW_STARTUP_PID, process.env.ELECTROBUN_LAUNCHER_PID]
         .map(Number).find(pid => Number.isSafeInteger(pid) && pid > 0 && pid <= 0x7fffffff) ?? process.pid;

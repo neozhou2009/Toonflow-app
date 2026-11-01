@@ -11,11 +11,13 @@ export default {
   },
   build: {
     mainProcess: "bun",
-    // ACT: Photon 与 anydoc 按包所在目录读取 WASM/原生文件，保留原包，避免引用构建机路径。
-    bun: { entrypoint: "apps/desktop/src/index.ts", minify: true, external: ["@silvia-odwyer/photon-node", "@firecrawl/anydoc", "@firecrawl/anydoc-wasm"] },
+    // ACT: Photon、anydoc 与沙盒依赖保留运行时目录，避免 WASM/Worker 引用构建机路径。
+    bun: { entrypoint: "apps/desktop/src/index.ts", minify: true, external: ["@silvia-odwyer/photon-node", "@firecrawl/anydoc", "@firecrawl/anydoc-wasm", "just-bash"] },
     copy: {
+      "build/desktop/ffmpeg/ffmpegWorker.js": "bun/ffmpegWorker.js",
+      "build/desktop/sandbox/sandboxProcess.js": "bun/sandboxProcess.js",
+      "build/desktop/node_modules": "bun/node_modules",
       "build/desktop/photon": "bun/node_modules/@silvia-odwyer/photon-node",
-      "build/desktop/node_modules/@firecrawl": "bun/node_modules/@firecrawl",
       ...(process.platform === "win32" ? {
         "build/desktop/protocol/startupLauncher.exe": "startupLauncher.exe",
         "build/desktop/protocol/protocolLauncher.exe": "protocolLauncher.exe",
@@ -40,6 +42,7 @@ export default {
     artifactFolder: process.platform === "darwin" ? `build/desktop/artifacts/${process.arch === "x64" ? "macX64" : "macArm64"}` : "build/desktop/artifacts",
     win: {
       icon: "packages/assets/logo.ico",
+      autoGrantPermissions: ["microphone", "notifications"],
     },
     mac: {
       icons: "packages/assets/logo.iconset",

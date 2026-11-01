@@ -83,11 +83,30 @@ export default async function prepareNative() {
   await run([cmake, "-S", cefDir, "-B", cefBuildDir, "-DPROJECT_ARCH=x86_64", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_ARCHITECTURES=x86_64", `-DCMAKE_OSX_DEPLOYMENT_TARGET=${minimumMacVersion}`, "-DUSE_SANDBOX=OFF"]);
   await run([cmake, "--build", cefBuildDir, "--target", "libcef_dll_wrapper", "--parallel", "4"]);
   const nativeDir = resolve(packageDir, "src/native");
+  const nativePath = resolve(nativeDir, "macos/nativeWrapper.mm");
+  const nativeSource = readFileSync(nativePath, "utf8");
+  const originalClose = `@implementation WindowDelegate
+    - (BOOL)windowShouldClose:(NSWindow *)sender {
+    return YES;
+    }`;
+  const confirmedClose = `@implementation WindowDelegate
+    - (BOOL)windowShouldClose:(NSWindow *)sender {
+        if (!g_eventLoopStopping.load() && g_quitRequestedHandler) {
+            g_quitRequestedHandler();
+            return NO;
+        }
+        return YES;
+    }`;
+  // ACT: 1.18.1 关闭前没有可取消事件；当前只有一个主窗口，交给应用退出确认。增加多窗口时改为按窗口确认。
+  if (!nativeSource.includes(confirmedClose)) {
+    if (nativeSource.split(originalClose).length !== 2) throw new Error("Intel 原生 SDK 的窗口关闭实现已变化，无法安装退出确认。");
+    writeFileSync(nativePath, nativeSource.replace(originalClose, confirmedClose));
+  }
   const nativeObject = resolve(cacheDir, "nativeWrapper.o");
   const wrapperLibrary = resolve(cacheDir, "libNativeWrapper.dylib");
   const asarLibrary = resolve(asarDir, "zig-out/lib/libasar.dylib");
   const dawnInclude = existsSync(resolve(dawnDir, "include/dawn/webgpu.h")) ? resolve(dawnDir, "include") : resolve(dawnDir, "darwin-x64/include");
-  await run(["xcrun", "--sdk", "macosx", "clang++", "-c", resolve(nativeDir, "macos/nativeWrapper.mm"), "-o", nativeObject, "-arch", "x86_64", `-mmacosx-version-min=${minimumMacVersion}`, "-Werror=unguarded-availability", "-fobjc-arc", "-fno-objc-msgsend-selector-stubs", `-I${cefDir}`, `-I${dawnInclude}`, "-std=c++20"]);
+  await run(["xcrun", "--sdk", "macosx", "clang++", "-c", nativePath, "-o", nativeObject, "-arch", "x86_64", `-mmacosx-version-min=${minimumMacVersion}`, "-Werror=unguarded-availability", "-fobjc-arc", "-fno-objc-msgsend-selector-stubs", `-I${cefDir}`, `-I${dawnInclude}`, "-std=c++20"]);
   await run(["xcrun", "--sdk", "macosx", "clang++", "-o", wrapperLibrary, nativeObject, asarLibrary, "-arch", "x86_64", `-mmacosx-version-min=${minimumMacVersion}`, ...["Cocoa", "WebKit", "QuartzCore", "Metal", "MetalKit", "UserNotifications"].flatMap(name => ["-framework", name]), `-F${resolve(cefDir, "Release")}`, "-weak_framework", "Chromium Embedded Framework", `-L${resolve(cefBuildDir, "libcef_dll_wrapper")}`, "-lcef_dll_wrapper", "-stdlib=libc++", "-shared", "-install_name", "@executable_path/libNativeWrapper.dylib", "-Wl,-rpath,@executable_path", "-Wl,-headerpad,0x1000"]);
 
   const outputs = [

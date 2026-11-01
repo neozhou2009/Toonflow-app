@@ -2,6 +2,7 @@ import { setLocaleFallback, t, translateMessage } from "@toonflow/server/i18n";
 import { setRuntimeHost } from "@toonflow/server/platform";
 import { detectLocale, normalizeLocale } from "@toonflow/i18n";
 import { execFile } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, writeAtomicSync } from "@toonflow/file";
 import { file } from "@toonflow/file/bun";
 import { resolve } from "node:path";
@@ -167,6 +168,14 @@ async function start() {
       // ACT: Windows SDK 未接管普通新窗口请求，在创建 WebView 弹窗前交给宿主。
       preload: `
         (() => {
+          // 开发者工具仅通过设置调用宿主 API 打开，屏蔽 WebView 的默认入口。
+          window.addEventListener("keydown", event => {
+            if (event.key === "F12" || ["KeyI", "KeyJ", "KeyC"].includes(event.code)
+              && (event.ctrlKey && event.shiftKey || event.metaKey && event.altKey)) {
+              event.preventDefault();
+            }
+          }, true);
+          window.addEventListener("contextmenu", event => event.preventDefault(), true);
           function openExternal(url) {
             const target = new URL(url, document.baseURI);
             if (!["http:", "https:"].includes(target.protocol)) return false;
@@ -194,6 +203,58 @@ async function start() {
         y: workArea.y + Math.round((workArea.height - height) / 2),
       },
     });
+    const quitApproval = new AsyncLocalStorage<boolean>();
+    let quitReady = false;
+    let quitAckTimer: ReturnType<typeof setTimeout> | undefined;
+    let pendingQuit: { requestId: string; resolve: (confirmed: boolean | undefined) => void } | undefined;
+    async function confirmQuit() {
+      if (isClosing) return true;
+      if (pendingQuit) return false;
+      const { promise, resolve } = Promise.withResolvers<boolean | undefined>();
+      const request = { requestId: crypto.randomUUID(), resolve };
+      pendingQuit = request;
+      try {
+        if (quitReady) {
+          try {
+            mainWindow.unminimize();
+            mainWindow.show();
+            mainWindow.activate();
+            // ACT: 只限制页面接收请求的时间，不限制用户阅读弹窗；页面失去响应时仍可退出。
+            quitAckTimer = setTimeout(() => request.resolve(undefined), 3000);
+            mainWindow.webview.executeJavascript(`window.dispatchEvent(new CustomEvent("toonflow:confirm-quit", { detail: ${JSON.stringify({ requestId: request.requestId })} }));`);
+            const confirmed = await promise;
+            if (confirmed !== undefined) return confirmed;
+            mainWindow.webview.executeJavascript(`window.dispatchEvent(new CustomEvent("toonflow:confirm-quit", { detail: ${JSON.stringify({ requestId: request.requestId, cancelled: true })} }));`);
+          } catch (error) {
+            console.error("应用内退出弹窗显示失败：", error);
+          } finally {
+            clearTimeout(quitAckTimer);
+          }
+        }
+        // ACT: 页面未就绪或加载失败时保留原生后备，正常界面使用应用内弹窗。
+        const result = await Utils.showMessageBox({
+          type: "warning",
+          title: t`退出 Toonflow`,
+          message: t`退出后，正在运行的任务将被中断。确定要退出吗？`,
+          buttons: [t`取消`, t`退出`],
+          defaultId: 0,
+          cancelId: 0,
+        });
+        return result.response === 1;
+      } finally {
+        if (pendingQuit === request) pendingQuit = undefined;
+      }
+    }
+    function requestQuit(event: { response?: { allow: boolean } }) {
+      if (isClosing || quitApproval.getStore()) return;
+      event.response = { allow: false };
+      if (pendingQuit) return;
+      void confirmQuit().then(confirmed => {
+        if (confirmed) quitApproval.run(true, () => Utils.quit());
+      }).catch(error => console.error("退出确认失败：", error));
+    }
+    Electrobun.events.on(`will-close-${mainWindow.id}`, requestQuit);
+    Electrobun.events.on("before-quit", requestQuit);
     let isControlHeld = () => false;
     let navigationTimer: ReturnType<typeof setTimeout> | undefined;
     function openLink(detail: unknown) {
@@ -223,7 +284,15 @@ async function start() {
     Electrobun.events.on(`new-window-open-${mainWindow.webview.id}`, (event: { data: { detail: unknown } }) => openLink(event.data.detail));
     Electrobun.events.on(`host-message-${mainWindow.webview.id}`, (event: { data: { detail: unknown } }) => {
       const detail = event.data.detail;
-      if (detail && typeof detail === "object" && "type" in detail && detail.type === "openExternal") openLink(detail);
+      if (!detail || typeof detail !== "object" || !("type" in detail)) return;
+      if (detail.type === "openExternal") openLink(detail);
+      if (detail.type === "quitReady" && "ready" in detail && typeof detail.ready === "boolean") {
+        quitReady = detail.ready;
+        if (!quitReady) pendingQuit?.resolve(false);
+      }
+      if (detail.type === "quitShown" && "requestId" in detail && detail.requestId === pendingQuit?.requestId) clearTimeout(quitAckTimer);
+      if (detail.type === "confirmQuit" && "requestId" in detail && detail.requestId === pendingQuit?.requestId
+        && "confirmed" in detail && typeof detail.confirmed === "boolean") pendingQuit?.resolve(detail.confirmed);
     });
     // 页面重载时监听器随旧页面销毁，安装请求等新页面 ready 后再投递。
     Electrobun.events.on(`will-navigate-${mainWindow.webview.id}`, (event: { data: { detail: unknown } }) => {
@@ -236,11 +305,15 @@ async function start() {
         openLink(detail);
         return;
       }
+      quitReady = false;
+      pendingQuit?.resolve(false);
       deliverInstall = undefined;
     });
     let isShowing = false;
+    const updater = process.platform === "win32" ? createWindowsUpdater(PATHS.RESOURCES_FOLDER, Utils as unknown as Parameters<typeof createWindowsUpdater>[1]) : Updater;
     app.locals.desktop = {
       openUrl,
+      showNotification: Utils.showNotification,
       showItemInFolder: Utils.showItemInFolder,
       readClipboardText: Utils.clipboardReadText,
       readClipboardImage: Utils.clipboardReadImage,
@@ -298,7 +371,14 @@ async function start() {
       },
       openDevTools() { mainWindow.webview.openDevTools(); },
       // ACT: Windows 使用两阶段退出；Intel Mac 由兼容入口适配 1.18.1 更新器。
-      updater: process.platform === "win32" ? createWindowsUpdater(PATHS.RESOURCES_FOLDER, Utils as unknown as Parameters<typeof createWindowsUpdater>[1]) : Updater,
+      updater: {
+        ...updater,
+        async applyUpdate() {
+          if (!await confirmQuit()) throw new Error(t`更新重启已取消`);
+          // ACT: 只批准这次更新调用链中的退出；普通关闭仍需确认，更新失败后不会留下全局放行状态。
+          await quitApproval.run(true, () => updater.applyUpdate());
+        },
+      },
     } satisfies DesktopRuntime;
     if (process.platform === "win32") {
       // ACT: Electrobun 2.0.1 未设置 Windows 窗口图标，复用构建产物中的应用 ICO。
@@ -351,6 +431,7 @@ async function start() {
       return ["^http://*", "^https://*", `http://127.0.0.1:${port}/*`];
     }
   } catch (error) {
+    isClosing = true;
     await desktopConnection?.close().catch(error => console.error("设备连接关闭失败：", error));
     splash?.close();
     console.error("桌面启动失败：", error);

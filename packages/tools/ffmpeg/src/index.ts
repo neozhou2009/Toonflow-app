@@ -1,11 +1,11 @@
 import { z } from "zod";
-import { chainMethods, executeRemoteFfmpeg, queryMethods, runMethods } from "@toonflow/ffmpeg/remote";
+import { chainMethods, queryMethods, runMethods } from "@toonflow/ffmpeg/remote";
 import type { ToolPlugin } from "@toonflow/tools-scaffold/runtime";
 
 const configSchema = z.strictObject({});
 const probeSchema = z.strictObject({
   path: z.string().min(1).describe("工作区媒体文件，相对路径或工作区内的绝对路径"),
-  options: z.array(z.string()).optional().describe("原生 ffprobe 选项，按参数数组原样传递"),
+  options: z.array(z.string()).optional().describe("原生 ffprobe 探测选项，按参数数组原样传递；结果按 JSON 解析，无需设置输出格式，不能改为其他格式"),
 });
 const processSchema = z.strictObject({
   options: z.strictObject({
@@ -32,12 +32,11 @@ const plugin: ToolPlugin = {
   validateConfig: config => configSchema.parse(config),
   createTools(context) {
     async function execute(request: z.infer<typeof processSchema>, signal?: AbortSignal) {
-      const ffmpeg = await context.ffmpeg(signal);
       let details: unknown;
       let error: Error | undefined;
       let filenames: unknown;
-      // ACT: 复用节点已有的 JSON 调用桥接，不在工具层重写参数、输出位置或原生执行规则。
-      await executeRemoteFfmpeg(ffmpeg, {
+      // ACT: 宿主在 Worker 中执行 JSON 调用，不在工具层重写参数、输出位置或原生执行规则。
+      await context.executeFfmpeg({
         directory: context.cwd,
         requestId: crypto.randomUUID(),
         options: request.options ?? {},
@@ -63,7 +62,7 @@ const plugin: ToolPlugin = {
       parameters: z.toJSONSchema(probeSchema, { io: "input", target: "draft-07" }),
       execute(_id, params, signal) {
         const { path, options } = probeSchema.parse(params);
-        return execute({ steps: [{ method: "input", args: [path] }], operation: { method: "ffprobe", args: options ? [options] : [] } }, signal);
+        return execute({ steps: [{ method: "input", args: [path] }], operation: { method: "ffprobe", args: [{ options: options ?? [], json: true }] } }, signal);
       },
     }, {
       name: "ffmpeg",

@@ -42,6 +42,7 @@
 </template>
 
 <script setup lang="ts">
+import { translate } from "@toonflow/i18n/vue";
 import axios from "axios";
 import { computed, onBeforeUnmount, ref } from "vue";
 import { IconFileCode, IconPackage, IconFolderOpen } from "@tabler/icons-vue";
@@ -84,7 +85,7 @@ onBeforeUnmount(() => {
 defineExpose({ importServers, ready });
 
 function errorMessage(cause: unknown) {
-  return axios.isAxiosError(cause) ? cause.response?.data?.message || cause.message : cause instanceof Error ? cause.message : "导入失败";
+  return axios.isAxiosError(cause) ? cause.response?.data?.message || cause.message : cause instanceof Error ? cause.message : translate("导入失败");
 }
 
 async function selectFile(event: Event) {

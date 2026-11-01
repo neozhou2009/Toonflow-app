@@ -27,7 +27,7 @@ export async function createTeamRunner(options: SubAgentModel & {
   const { name, cwd, tools, canvas, ...modelOptions } = options;
   const { directory, manifest, files, enabled } = await readTeam(name);
   if (!enabled) throw new Error(t`团队 ${name} 已禁用`);
-  const hostTools = tools.filter(tool => !["subAgent", "report", "askUser", "delegate", "teamResources", "requestInput"].includes(tool.name));
+  const hostTools = tools.filter(tool => !["subAgent", "report", "listAgents", "sendAgentMessage", "askUser", "delegate", "teamResources", "requestInput"].includes(tool.name));
   const privatePlugins = await Promise.all(Object.entries(manifest.tools ?? {}).map(async ([pluginName, config]) => {
     const { plugin, metadata } = await loadTool(pluginName, join(directory, "tools"));
     return { plugin, metadata, config: validateToolConfig(plugin, config) };
@@ -39,7 +39,7 @@ export async function createTeamRunner(options: SubAgentModel & {
     for (const { plugin, metadata, config } of privatePlugins) {
       const definitions = await plugin.createTools(createAgentToolContext(cwd, config, canvas));
       for (const tool of definitions) {
-        if (!tool.name || typeof tool.execute !== "function" || ["subAgent", "askUser", "delegate", "teamResources", "requestInput"].includes(tool.name) || available.has(tool.name)) {
+        if (!tool.name || typeof tool.execute !== "function" || ["subAgent", "listAgents", "sendAgentMessage", "askUser", "delegate", "teamResources", "requestInput"].includes(tool.name) || available.has(tool.name)) {
           throw new Error(t`团队私有工具无效或名称重复：${tool.name}`);
         }
         available.set(tool.name, { ...tool, promptGuidelines: [...(metadata.prompt ? [metadata.prompt] : []), ...(tool.promptGuidelines ?? [])] });

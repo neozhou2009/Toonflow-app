@@ -3,12 +3,14 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -28,7 +30,15 @@ internal static class updateHelper
     [STAThread]
     private static int Main(string[] args)
     {
-        Console.SetError(new StreamWriter(Console.OpenStandardError(), new UTF8Encoding(false)) { AutoFlush = true });
+        // ACT: nsExec 只识别 UTF-16/系统编码；桌面宿主继续读取 UTF-8。
+        bool installerOutput = args.Length > 0 && args[args.Length - 1] == "--utf16";
+        if (installerOutput) Array.Resize(ref args, args.Length - 1);
+        Encoding outputEncoding = installerOutput ? (Encoding)new UnicodeEncoding(false, false) : new UTF8Encoding(false);
+        Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), outputEncoding) { AutoFlush = true });
+        Console.SetError(new StreamWriter(Console.OpenStandardError(), outputEncoding) { AutoFlush = true });
+        if (installerOutput) Console.Write("\uFEFF");
+        if (args.Length > 0 && (args[0] == "--ensure-archive-tool" || args[0] == "--read-archive-info" || args[0] == "--extract-install"))
+            return archiveCommand(args);
         string root = null, transaction = null, version = null, hash = null, planPath = null;
         bool quiet = Array.IndexOf(args, "--quiet") >= 0;
         Mutex mutex = null;
@@ -96,12 +106,11 @@ internal static class updateHelper
                     if (!String.Equals(BitConverter.ToString(sha.ComputeHash(archiveStream)).Replace("-", ""), expectedDigest, StringComparison.OrdinalIgnoreCase))
                         throw new InvalidOperationException("更新包 SHA-256 校验失败。");
                 archiveStream.Position = 0;
-                validateTar(archiveStream);
-                string tar = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), Environment.Is64BitOperatingSystem && !Environment.Is64BitProcess ? "Sysnative" : "System32", "tar.exe");
-                if (!File.Exists(tar)) throw new FileNotFoundException("未找到 Windows 系统 tar.exe。");
+                string archiveRoot = validateTar(archiveStream);
+                string tar = ensureArchiveTool(root, false);
                 if (!CreateDirectoryW(stage, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error(), "无法创建独立的更新暂存目录。");
                 ensurePlainPath(stage);
-                extract(tar, archive, stage);
+                extract(tar, archive, stage, archiveRoot);
                 ensurePlainTree(stage);
                 verifyApp(stage, identifier, channel, version, hash);
                 if (!File.Exists(planPath)) throw new InvalidOperationException("更新已取消。");
@@ -381,19 +390,324 @@ internal static class updateHelper
         if (!process.WaitForExit(10000)) throw new InvalidOperationException("新版本仍未退出，已保留应用备份。");
     }
 
-    private static void extract(string tar, string archive, string stage)
+    private static int archiveCommand(string[] args)
     {
-        using (var process = Process.Start(new ProcessStartInfo(tar, "-xf " + quote(archive) + " -C " + quote(stage) + " --strip-components=1")
+        bool quiet = Array.IndexOf(args, "--quiet") >= 0;
+        try
+        {
+            int count = args.Length - (quiet ? 1 : 0);
+            if ((quiet && args[args.Length - 1] != "--quiet")
+                || count != (args[0] == "--ensure-archive-tool" ? 2 : args[0] == "--read-archive-info" ? 4 : 3))
+                throw new InvalidOperationException("更新助手参数无效。");
+            string installRoot = fullPath(args[1]);
+            ensurePlainPath(installRoot);
+            if (!Directory.Exists(installRoot)) throw new DirectoryNotFoundException("安装目录不存在。");
+            if (args[0] == "--ensure-archive-tool")
+            {
+                Console.WriteLine(ensureArchiveTool(installRoot, true));
+                return 0;
+            }
+            string archive = fullPath(args[2]);
+            if (!inside(archive, Path.Combine(installRoot, "self-extraction")))
+                throw new InvalidOperationException("更新包不属于此安装目录。");
+            ensurePlainPath(archive);
+            string tool = ensureArchiveTool(installRoot, false);
+            using (var stream = new FileStream(archive, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                if (args[0] == "--read-archive-info")
+                {
+                    string member = args[3];
+                    if (!Regex.IsMatch(member, "^[a-zA-Z0-9_-]+/Resources/version\\.json$"))
+                        throw new InvalidOperationException("更新元数据路径无效。");
+                    string output = runArchiveTool(tool, samePath(tool, systemTar())
+                        ? "-xOf " + quote(archive) + " " + quote(member)
+                        : "x -so -ttar -spd " + quote(archive) + " " + quote(member), 60000);
+                    if (utf8.GetByteCount(output) > 65536) throw new InvalidOperationException("更新元数据过大。");
+                    Console.Write(output);
+                }
+                else
+                {
+                    string archiveRoot = validateTar(stream);
+                    string app = Path.Combine(installRoot, "app");
+                    ensurePlainPath(app);
+                    Directory.CreateDirectory(app);
+                    extract(tool, archive, app, archiveRoot);
+                }
+            }
+            return 0;
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine(error.Message);
+            if (!quiet) MessageBox.Show(error.Message, "Toonflow 解压失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 1;
+        }
+    }
+
+    private static string systemTar()
+    {
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            Environment.Is64BitOperatingSystem && !Environment.Is64BitProcess ? "Sysnative" : "System32", "tar.exe");
+    }
+
+    private static string ensureArchiveTool(string root, bool download)
+    {
+        string tar = systemTar();
+        try
+        {
+            if ((File.GetAttributes(tar) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                throw new InvalidOperationException("Windows 系统 tar.exe 路径无效。");
+            return tar;
+        }
+        catch (FileNotFoundException) { }
+        catch (DirectoryNotFoundException) { }
+        string directory = Path.Combine(root, "runtime", "sevenZip");
+        string tool = Path.Combine(directory, "sevenZip.exe");
+        if (archiveToolReady(directory)) return tool;
+        if (!download) throw new FileNotFoundException("未找到可用的解压工具，请重新准备安装或更新。");
+        string mutexName;
+        using (var sha = SHA256.Create()) mutexName = BitConverter.ToString(sha.ComputeHash(utf8.GetBytes(root.ToUpperInvariant()))).Replace("-", "");
+        using (var mutex = new Mutex(false, "Local\\ToonflowArchiveTool-" + mutexName))
+        {
+            bool locked = false;
+            string temporary = null;
+            var timer = Stopwatch.StartNew();
+            try
+            {
+                try { locked = mutex.WaitOne(600000); }
+                catch (AbandonedMutexException) { locked = true; }
+                if (!locked) throw new InvalidOperationException("等待解压工具下载超时，请重试。");
+                if (archiveToolReady(directory)) return tool;
+                string runtime = Path.GetDirectoryName(directory);
+                ensurePlainPath(runtime);
+                Directory.CreateDirectory(runtime);
+                temporary = Path.Combine(runtime, "sevenZip" + Guid.NewGuid().ToString("N"));
+                if (!CreateDirectoryW(temporary, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error(), "无法创建解压工具暂存目录。");
+                ensurePlainPath(temporary);
+                string bootstrap = Path.Combine(temporary, "bootstrap.exe");
+                string package = Path.Combine(temporary, "extra.7z");
+                downloadArchiveFile("https://github.com/ip7z/7zip/releases/download/26.05/7zr.exe", bootstrap, 602624,
+                    "9bf582b894dfa665f852d7e9112b02290a1c303c2d95a21fcdc41ffcb03143b7", timer);
+                downloadArchiveFile("https://github.com/ip7z/7zip/releases/download/26.05/7z2605-extra.7z", package, 1763900,
+                    "f27a8f103c84785026edcba1f67faf1357225df9d19ddb0b7760d55947141bc7", timer);
+                string copying = Path.Combine(temporary, "copying.txt");
+                downloadArchiveFile("https://raw.githubusercontent.com/ip7z/7zip/26.05/DOC/copying.txt", copying, 26530,
+                    "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551", timer);
+                string unpack = Path.Combine(temporary, "package");
+                Directory.CreateDirectory(unpack);
+                runArchiveTool(bootstrap, "x -y -spd -bso0 -bsp0 " + quote(package) + " -o" + quote(unpack) + " x64/7za.exe License.txt", 60000);
+                ensurePlainTree(unpack);
+                string extracted = Path.Combine(unpack, "x64", "7za.exe");
+                if (!fileMatches(extracted, "7ddf0a3bc451e166679296be630d6f0573eb386159c04184761c43020c484291"))
+                    throw new InvalidOperationException("解压工具 SHA-256 校验失败。");
+                string license = Path.Combine(unpack, "License.txt");
+                if (!File.Exists(license) || new FileInfo(license).Length == 0 || new FileInfo(license).Length > 65536)
+                    throw new InvalidOperationException("解压工具许可证缺失。");
+                ensurePlainPath(directory);
+                Directory.CreateDirectory(directory);
+                publishArchiveFile(copying, Path.Combine(directory, "copying.txt"));
+                publishArchiveFile(license, Path.Combine(directory, "license.txt"));
+                publishArchiveFile(extracted, tool);
+                return tool;
+            }
+            finally
+            {
+                try
+                {
+                    if (temporary != null && Directory.Exists(temporary))
+                    {
+                        ensurePlainTree(temporary);
+                        Directory.Delete(temporary, true);
+                    }
+                }
+                finally { if (locked) mutex.ReleaseMutex(); }
+            }
+        }
+    }
+
+    private static bool archiveToolReady(string directory)
+    {
+        ensurePlainPath(directory);
+        string license = Path.Combine(directory, "license.txt");
+        ensurePlainPath(license);
+        return File.Exists(license) && new FileInfo(license).Length > 0 && new FileInfo(license).Length <= 65536
+            && fileMatches(Path.Combine(directory, "copying.txt"), "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551")
+            && fileMatches(Path.Combine(directory, "sevenZip.exe"), "7ddf0a3bc451e166679296be630d6f0573eb386159c04184761c43020c484291");
+    }
+
+    private static bool fileMatches(string path, string digest)
+    {
+        ensurePlainPath(path);
+        if (!File.Exists(path)) return false;
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (var sha = SHA256.Create())
+            return String.Equals(BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", ""), digest, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void publishArchiveFile(string source, string destination)
+    {
+        ensurePlainPath(destination);
+        bool replace = File.Exists(destination);
+        var timer = Stopwatch.StartNew();
+        while (true)
+        {
+            ensurePlainPath(source);
+            ensurePlainPath(destination);
+            if ((File.GetAttributes(source) & FileAttributes.Directory) != 0 || Directory.Exists(destination))
+                throw new IOException("解压文件不能覆盖目录：" + source + " -> " + destination);
+            if (replace && (File.GetAttributes(destination) & FileAttributes.ReadOnly) != 0)
+                throw new UnauthorizedAccessException("无法覆盖只读文件：" + destination);
+            try
+            {
+                if (replace) File.Replace(source, destination, null);
+                else File.Move(source, destination);
+                return;
+            }
+            catch (IOException error)
+            {
+                int code = error.HResult & 0xffff;
+                // ACT: 每个文件的短暂占用最多等待10秒；1175保留双方原名，1176/1177可能改变文件状态，不能重试。
+                if ((code != 32 && code != 33 && !(replace && code == 1175))
+                    || timer.Elapsed.TotalSeconds >= 10 || !File.Exists(source) || (replace && !File.Exists(destination)))
+                    throw new IOException("无法发布解压文件：" + source + " -> " + destination
+                        + "（0x" + error.HResult.ToString("X8") + "）：" + error.Message, error);
+                Thread.Sleep(200);
+            }
+        }
+    }
+
+    private static void downloadArchiveFile(string address, string path, long size, string digest, Stopwatch timer)
+    {
+        var uri = new Uri(address);
+        var fileTimer = Stopwatch.StartNew();
+        ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+        for (int redirect = 0; redirect <= 5; redirect++)
+        {
+            if (uri.Scheme != Uri.UriSchemeHttps || uri.UserInfo.Length != 0
+                || (uri.Host != "github.com" && uri.Host != "release-assets.githubusercontent.com" && uri.Host != "raw.githubusercontent.com"))
+                throw new InvalidOperationException("解压工具下载地址无效。");
+            int remaining = (int)Math.Min(300000 - fileTimer.ElapsedMilliseconds, 600000 - timer.ElapsedMilliseconds);
+            if (remaining <= 0) throw new TimeoutException("解压工具下载超时，请检查网络后重试。");
+            var request = (HttpWebRequest)WebRequest.Create(uri);
+            request.AllowAutoRedirect = false;
+            request.Timeout = remaining;
+            request.ReadWriteTimeout = remaining;
+            request.UserAgent = "Toonflow";
+            using (var timeout = new System.Threading.Timer(value => request.Abort(), null, remaining, Timeout.Infinite))
+            using (var response = (HttpWebResponse)request.GetResponse())
+            {
+                int status = (int)response.StatusCode;
+                if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308)
+                {
+                    uri = new Uri(uri, response.Headers[HttpResponseHeader.Location]);
+                    continue;
+                }
+                if (status != 200 || (response.ContentLength >= 0 && response.ContentLength != size))
+                    throw new InvalidOperationException("解压工具下载内容不匹配。");
+                using (var input = response.GetResponseStream())
+                using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    byte[] buffer = new byte[81920];
+                    long received = 0;
+                    int count;
+                    while ((count = input.Read(buffer, 0, buffer.Length)) != 0)
+                    {
+                        received += count;
+                        if (received > size) throw new InvalidOperationException("解压工具下载内容过大。");
+                        output.Write(buffer, 0, count);
+                    }
+                    if (received != size) throw new InvalidOperationException("解压工具下载不完整。");
+                    output.Flush(true);
+                }
+                if (!fileMatches(path, digest)) throw new InvalidOperationException("解压工具 SHA-256 校验失败。");
+                return;
+            }
+        }
+        throw new InvalidOperationException("解压工具下载重定向过多。");
+    }
+
+    private static string readToolOutput(StreamReader reader)
+    {
+        var result = new StringBuilder();
+        var buffer = new char[2048];
+        int count;
+        while ((count = reader.Read(buffer, 0, buffer.Length)) > 0)
+            if (result.Length <= 65536) result.Append(buffer, 0, Math.Min(count, 65537 - result.Length));
+        return result.ToString();
+    }
+
+    private static string runArchiveTool(string tool, string arguments, int timeout)
+    {
+        using (var process = Process.Start(new ProcessStartInfo(tool, arguments)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
+            RedirectStandardOutput = true,
             RedirectStandardError = true,
+            StandardOutputEncoding = utf8,
+            StandardErrorEncoding = utf8,
             WindowStyle = ProcessWindowStyle.Hidden
         }))
         {
-            string error = process.StandardError.ReadToEnd();
-            process.WaitForExit();
-            if (process.ExitCode != 0) throw new InvalidOperationException("更新包解压失败：" + error);
+            if (process == null) throw new InvalidOperationException("无法启动解压工具。");
+            var output = Task.Factory.StartNew(() => readToolOutput(process.StandardOutput));
+            var error = Task.Factory.StartNew(() => readToolOutput(process.StandardError));
+            try
+            {
+                if (!process.WaitForExit(timeout)) throw new TimeoutException("解压工具执行超时。");
+                if (!Task.WaitAll(new Task[] { output, error }, 5000)) throw new TimeoutException("读取解压工具输出超时。");
+                if (process.ExitCode != 0) throw new InvalidOperationException("更新包解压失败：" + error.Result);
+                if (output.Result.Length > 65536) throw new InvalidOperationException("解压工具输出过大。");
+                return output.Result;
+            }
+            finally
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                    process.WaitForExit(5000);
+                }
+            }
+        }
+    }
+
+    private static void extract(string tool, string archive, string stage, string archiveRoot)
+    {
+        ensurePlainTree(stage);
+        if (samePath(tool, systemTar()))
+        {
+            runArchiveTool(tool, "-xf " + quote(archive) + " -C " + quote(stage) + " --strip-components=1", 600000);
+            return;
+        }
+        string unpack = Path.Combine(Path.GetDirectoryName(archive), "unpack" + Guid.NewGuid().ToString("N"));
+        if (!CreateDirectoryW(unpack, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error(), "无法创建独立的解压目录。");
+        try
+        {
+            ensurePlainPath(unpack);
+            runArchiveTool(tool, "x -ttar -y -bso0 -bsp0 " + quote(archive) + " -o" + quote(unpack), 600000);
+            ensurePlainTree(unpack);
+            string source = Path.Combine(unpack, archiveRoot);
+            if (Directory.GetFileSystemEntries(unpack).Length != 1 || !Directory.Exists(source))
+                throw new InvalidOperationException("更新包必须只有一个顶层目录且不能重复路径。");
+            mergeArchiveDirectory(source, stage);
+        }
+        finally
+        {
+            ensurePlainTree(unpack);
+            Directory.Delete(unpack, true);
+        }
+    }
+
+    private static void mergeArchiveDirectory(string source, string destination)
+    {
+        ensurePlainPath(destination);
+        Directory.CreateDirectory(destination);
+        foreach (string path in Directory.EnumerateFileSystemEntries(source))
+        {
+            string target = Path.Combine(destination, Path.GetFileName(path));
+            ensurePlainPath(target);
+            if (Directory.Exists(path)) mergeArchiveDirectory(path, target);
+            else publishArchiveFile(path, target);
         }
     }
 
@@ -446,7 +760,7 @@ internal static class updateHelper
         }
     }
 
-    private static void validateTar(Stream stream)
+    private static string validateTar(Stream stream)
     {
         byte[] header = new byte[512];
         var entries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -465,7 +779,7 @@ internal static class updateHelper
                 while ((count = stream.Read(tail, 0, tail.Length)) > 0)
                     for (int index = 0; index < count; index++)
                         if (tail[index] != 0) throw new InvalidOperationException("更新 TAR 包含附加内容。");
-                return;
+                return rootName;
             }
             long checksum = 0;
             for (int index = 0; index < header.Length; index++) checksum += index >= 148 && index < 156 ? 32 : header[index];

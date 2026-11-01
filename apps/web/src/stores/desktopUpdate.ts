@@ -2,8 +2,9 @@ import axios from "axios";
 import { computed, ref, shallowRef, watch } from "vue";
 import type { updateSnapshot } from "@toonflow/server/desktop";
 import { settings } from "@/stores/settings";
-import { isRemoteConnection } from "@/lib/platform";
+import { actualPlatform } from "@/lib/platform";
 
+export const desktopAutoUpdate = computed(() => settings.value.desktopAutoUpdate !== false);
 export const desktopUpdateCustomUrl = computed(() => typeof settings.value.desktopUpdateCustomUrl === "string" ? settings.value.desktopUpdateCustomUrl : "");
 export const desktopUpdateSource = computed(() => settings.value.desktopUpdateSource === "custom" && desktopUpdateCustomUrl.value ? "custom"
   : settings.value.desktopUpdateSource === "github" ? "github" : "official");
@@ -87,12 +88,45 @@ export function stopDesktopUpdateObservation() {
   updateController?.abort();
 }
 
-export function checkDesktopUpdate(readFirst = false) {
-  return runDesktopUpdate("check", readFirst);
+export function registerDesktopAutoUpdate() {
+  const intervalMs = 15 * 60 * 1000;
+  const activityEvents = ["pointerdown", "keydown", "wheel"];
+  let lastActivityAt = -Infinity;
+  function markActivity(event: Event) {
+    if (event.isTrusted && !document.hidden) lastActivityAt = Date.now();
+  }
+  for (const event of activityEvents) window.addEventListener(event, markActivity, { passive: true, capture: true });
+  void startDesktopUpdate().catch(() => {});
+  const interval = window.setInterval(() => {
+    const snapshot = desktopUpdateSnapshot.value;
+    // ACT: 只在最近十五分钟有真实操作时检查；空闲不取消已经开始的下载。
+    if (!desktopAutoUpdate.value || document.hidden || Date.now() - lastActivityAt >= intervalMs || pendingUpdate
+      || snapshot?.channel === "dev" || snapshot?.updating || snapshot?.updateReady || snapshot?.installFailure) return;
+    void startDesktopUpdate().catch(() => {});
+  }, intervalMs);
+  return () => {
+    window.clearInterval(interval);
+    for (const event of activityEvents) window.removeEventListener(event, markActivity, true);
+  };
 }
 
-export function runDesktopUpdate(nextAction: NonNullable<typeof desktopUpdateAction.value>, readFirst = false) {
-  if (isRemoteConnection) return Promise.reject(new Error("连接其他设备时无法更新本机客户端，请断开并独立运行后重试。"));
+export async function startDesktopUpdate() {
+  const source = desktopUpdateKey.value;
+  let snapshot = await runDesktopUpdate("read");
+  if (!desktopAutoUpdate.value || desktopUpdateKey.value !== source || snapshot.channel === "dev"
+    || snapshot.updating || snapshot.updateReady || snapshot.installFailure) return snapshot;
+  snapshot = await runDesktopUpdate("check");
+  if (!desktopAutoUpdate.value || desktopUpdateKey.value !== source || snapshot.channel === "dev" || snapshot.error
+    || snapshot.updating || snapshot.installFailure || !snapshot.canUpdate || !snapshot.updateAvailable || snapshot.updateReady) return snapshot;
+  // ACT: 关闭开关仅阻止尚未开始的自动步骤，已开始的下载继续完成；安装仍由用户确认。
+  return runDesktopUpdate("download");
+}
+
+export function runDesktopUpdate(nextAction: NonNullable<typeof desktopUpdateAction.value>) {
+  if (!actualPlatform.isLocalDesktop) {
+    desktopUpdateError.value = actualPlatform.isDesktop ? "连接其他设备时无法更新本机客户端，请断开并独立运行后重试。" : "请在桌面客户端中检查更新。";
+    return Promise.reject(new Error(desktopUpdateError.value));
+  }
   if (pendingUpdate) return pendingUpdate;
   // 上轮观察超时后只能重新读取，不能因客户端没有收到结果而再次提交安装。
   if (desktopUpdateSnapshot.value?.updating) nextAction = "read";
@@ -102,11 +136,9 @@ export function runDesktopUpdate(nextAction: NonNullable<typeof desktopUpdateAct
   desktopUpdateAction.value = nextAction;
   desktopUpdateError.value = "";
   pendingUpdate = (async () => {
-    if (nextAction === "read" || readFirst) {
+    if (nextAction === "read") {
       const snapshot = await readUpdate(source, controller.signal);
-      if (nextAction === "read" || desktopUpdateKey.value !== source || snapshot.channel === "dev" || snapshot.updating
-        || snapshot.updateAvailable || snapshot.updateReady || snapshot.installFailure)
-        return observeUpdate(snapshot, source, controller.signal);
+      return observeUpdate(snapshot, source, controller.signal);
     }
     let snapshot: updateSnapshot;
     if ((nextAction === "download" || nextAction === "apply") && desktopUpdateSnapshot.value)

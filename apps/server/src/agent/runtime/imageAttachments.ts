@@ -4,6 +4,7 @@ import { mkdir, readFile, realpath, stat, writeAtomic } from "@toonflow/file";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { resolveWorkspacePath } from "@/utils/workspace/files";
+import { t } from "@/lib/i18n";
 
 export type AgentImageReference = { id: string; path: string; sourcePath: string; mimeType: string; bytes: number; note?: string };
 export type AgentImagePart = TextContent & { toonflowImage: AgentImageReference };
@@ -50,7 +51,7 @@ async function saveImageBytes(cwd: string, bytes: Uint8Array, mimeType: string, 
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     const saved = await readFile((await resolveWorkspacePath(cwd, relativePath)).path, { signal });
-    if (imageHash(saved) !== hash) throw new Error(`图片附件内容校验失败：${relativePath}`);
+    if (imageHash(saved) !== hash) throw new Error(t`图片附件内容校验失败：${relativePath}`);
   }
   signal?.throwIfAborted();
   return relativePath;
@@ -64,7 +65,7 @@ export async function readAgentImage(cwd: string, reference: AgentImageReference
   const bytes = await readFile(target.path, { signal });
   signal?.throwIfAborted();
   if (bytes.byteLength !== checked.bytes || imageHash(bytes) !== imagePathPattern.exec(checked.path)![1]) {
-    throw new Error(`图片附件内容校验失败：${checked.path}`);
+    throw new Error(t`图片附件内容校验失败：${checked.path}`);
   }
   return { type: "image", mimeType: checked.mimeType, data: bytes.toString("base64") };
 }

@@ -5,6 +5,7 @@ import { z } from "zod";
 import u from "@/utils";
 import { validateFields } from "@/lib/middleware";
 import { success } from "@/lib/responseFormat";
+import { t, translateError, translateMessage } from "@/lib/i18n";
 
 const inputSchema = z.strictObject({
   directory: z.string().min(1).max(4096),
@@ -30,12 +31,7 @@ export default Router().post("/", validateFields(inputSchema.shape), async (req,
     const maxBytes = 512 * 1024 * 1024;
     const bytes = await u.workspaceDownload.downloadPublicFile(input.url, { signal, maxBytes, label: "项目包", httpsOnly: true });
     signal.throwIfAborted();
-    let files: Map<string, Uint8Array>;
-    try { files = u.pluginInstall.skillZip(bytes, { maxBytes, maxEntries: 20000 }); }
-    catch (error) {
-      if (error instanceof Error) error.message = error.message.replaceAll("技能", "项目").replaceAll("插件", "项目");
-      throw error;
-    }
+    const files = u.pluginInstall.skillZip(bytes, { maxBytes, maxEntries: 20000 });
     const paths = [...files.keys()];
     const hasCanvas = paths.some(path => {
       const content = files.get(path)!;
@@ -80,7 +76,7 @@ export default Router().post("/", validateFields(inputSchema.shape), async (req,
           || actual !== directory || !u.workspaceFile.isWithin(parent, actual) || directory === parent) throw new Error("项目目录已变更，未自动删除");
         await rm(directory, { recursive: true });
       } catch (cleanupError) {
-        throw new Error(`项目克隆失败，未能清理下载目录 ${directory}：${cleanupError instanceof Error ? cleanupError.message : "请检查目录权限"}`, { cause: error });
+        throw new Error(t`项目克隆失败，未能清理下载目录 ${directory}：${cleanupError instanceof Error ? translateError(cleanupError) : translateMessage("请检查目录权限")}`, { cause: error });
       }
     }
     if (signal.aborted && !controller.signal.aborted) throw Object.assign(new Error("项目克隆超时（5 分钟），请检查网络后重试", { cause: error }), { status: 504 });

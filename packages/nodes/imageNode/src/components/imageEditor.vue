@@ -1,6 +1,7 @@
 <template>
-  <div class="imageEditor" :class="{ editing: mode }">
-    <img ref="sourceImage" :src="src" :alt="alt" draggable="false" @load="emit('load', $event)" @error="emit('error', $event)" />
+  <div class="imageEditor" :class="{ editing: mode, previewUnavailable: preparingPreview || previewError }" :style="{ '--imageRatio': imageRatio }" :aria-busy="preparingPreview">
+    <img ref="sourceImage" :src="previewSrc" :alt="alt" draggable="false" @load="imageLoaded" @error="handleError" />
+    <div v-if="preparingPreview || previewError" class="previewStatus" role="status">{{ preparingPreview ? "正在生成兼容预览…" : previewError }}</div>
     <canvas
       v-if="mode"
       ref="paintCanvas"
@@ -59,11 +60,14 @@ import { ElButton, ElMessage } from "element-plus";
 import { IconBrush, IconEraser, IconSquare, IconCircle, IconTypography, IconArrowBackUp, IconArrowForwardUp, IconTrash, IconCheck, IconX } from "@tabler/icons-vue";
 import { uploadNodeFile, useNodeFiles } from "@toonflow/nodes-scaffold/runtime";
 import { showNodeError } from "@toonflow/node-shared/showNodeError";
+import { useMediaPreview } from "@toonflow/node-shared/mediaPreview";
 import { useImageVariationNode } from "../useImageVariationNode";
 import { buildInpaintPrompt, type InpaintDraftInput } from "../imageInpaint";
 
 const props = defineProps<{ src: string; alt: string; toolbarTarget?: HTMLElement; disabled?: boolean }>();
-const emit = defineEmits<{ load: [event: Event]; error: [event: Event] }>();
+const emit = defineEmits<{ load: [event: Event]; error: [error: Error] }>();
+const { src: previewSrc, preparing: preparingPreview, error: previewError, handleError, handleLoaded } = useMediaPreview(() => props.src, "image");
+watch(previewError, message => { if (message) emit("error", new Error(message)); });
 const { node } = useNode();
 const { addNodes, addEdges, findNode, getNodes, nodeTypes } = useVueFlow();
 const files = useNodeFiles();
@@ -71,6 +75,7 @@ const createVariation = useImageVariationNode();
 const getCanvas = inject<(() => { id: string } | undefined) | undefined>("canvas", undefined);
 const batchHistory = inject<(action: () => Promise<void>) => Promise<void>>("batchCanvasHistory", action => action());
 const sourceImage = ref<HTMLImageElement>();
+const imageRatio = ref(1);
 const paintCanvas = ref<HTMLCanvasElement>();
 const mode = ref<"inpaint" | "mark">();
 const busy = ref(false);
@@ -102,6 +107,14 @@ let draftStroke: Stroke | undefined;
 let pointerId: number | undefined;
 let operation: AbortController | undefined;
 
+function imageLoaded(event: Event) {
+  const image = event.target as HTMLImageElement;
+  if (image.currentSrc !== previewSrc.value) return;
+  handleLoaded(event);
+  if (image.naturalWidth && image.naturalHeight) imageRatio.value = image.naturalWidth / image.naturalHeight;
+  emit("load", event);
+}
+
 function cancel() {
   operation?.abort();
   mode.value = undefined;
@@ -111,7 +124,7 @@ function cancel() {
   textDraft.value = undefined;
   cancelStroke();
 }
-watch(() => props.src, cancel, { flush: "sync" });
+watch(previewSrc, cancel, { flush: "sync" });
 watch(() => getCanvas?.()?.id, cancel, { flush: "sync" });
 onBeforeUnmount(cancel);
 
@@ -399,7 +412,7 @@ async function createInpaint(input: InpaintDraftInput, signal: AbortSignal) {
   }
 }
 
-defineExpose({ mode, busy, start, cancel, createInpaint });
+defineExpose({ mode, busy, start, cancel, createInpaint, previewSrc });
 </script>
 
 <style scoped lang="scss">
@@ -408,6 +421,33 @@ defineExpose({ mode, busy, start, cancel, createInpaint });
   width: 100%;
   display: grid;
   place-items: center;
+
+  &.previewUnavailable { min-height: 144px; }
+  .previewStatus {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 16px;
+    background: var(--el-fill-color-darker);
+    color: var(--el-text-color-secondary);
+    font-size: 12px;
+    text-align: center;
+    overflow: auto;
+  }
+
+  .nodeSkeleton.resized & {
+    height: 100%;
+    container-type: size;
+
+    img,
+    .paintCanvas {
+      width: min(100cqw, calc(100cqh * var(--imageRatio)));
+      height: min(100cqh, calc(100cqw / var(--imageRatio)));
+      max-width: none;
+      max-height: none;
+    }
+  }
 
   img { display: block; width: 100%; max-height: 240px; object-fit: contain; border-radius: var(--el-border-radius-base); }
   .paintCanvas { position: absolute; max-width: 100%; max-height: 100%; height: 100%; touch-action: none; cursor: crosshair; }

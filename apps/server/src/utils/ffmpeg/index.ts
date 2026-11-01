@@ -1,11 +1,9 @@
 import { t, translateError, translateMessage } from "@/lib/i18n";
 import { dirname, join } from "node:path";
-import { build, createFfmpeg, downloadSources, getToolStatus, installFfmpeg, target } from "@toonflow/ffmpeg";
-import type { DownloadState, FfmpegMode, SourceId } from "@toonflow/ffmpeg";
+import { build, createFfmpeg, downloadSources, executeFfmpegInWorker, getToolStatus, installFfmpeg, target } from "@toonflow/ffmpeg";
+import type { BrowserFfmpegRequest, DownloadState, FfmpegMode, FfmpegRemoteEvent, SourceId } from "@toonflow/ffmpeg";
 import conf from "@/utils/conf";
 import { getRuntimePlatform } from "@/lib/platform";
-
-export { executeRemoteFfmpeg } from "@toonflow/ffmpeg";
 
 const directory = join(dirname(conf.path), "ffmpeg", target);
 let download: DownloadState = { phase: "idle", received: 0 };
@@ -19,7 +17,7 @@ export function onRequired(listener: () => void) {
   return () => { requiredListeners.delete(listener); };
 }
 
-export async function createWorkspaceFfmpeg(cwd: string, signal?: AbortSignal) {
+export async function prepareWorkspaceFfmpeg(signal?: AbortSignal) {
   signal?.throwIfAborted();
   const { tools } = await getStatus();
   signal?.throwIfAborted();
@@ -29,10 +27,26 @@ export async function createWorkspaceFfmpeg(cwd: string, signal?: AbortSignal) {
       name: "FfmpegRequiredError", code: "FFMPEG_REQUIRED", status: 424,
     });
   }
+  return { ffmpeg: tools.ffmpeg.path, ffprobe: tools.ffprobe.path };
+}
+
+export async function createWorkspaceFfmpeg(cwd: string, signal?: AbortSignal) {
+  const paths = await prepareWorkspaceFfmpeg(signal);
   const ffmpeg = createFfmpeg(cwd);
-  ffmpeg.setFfmpegPath(tools.ffmpeg.path);
-  ffmpeg.setFfprobePath(tools.ffprobe.path);
+  ffmpeg.setFfmpegPath(paths.ffmpeg);
+  ffmpeg.setFfprobePath(paths.ffprobe);
   return ffmpeg;
+}
+
+export async function executeWorkspaceFfmpeg(
+  cwd: string,
+  request: BrowserFfmpegRequest,
+  emit: (event: FfmpegRemoteEvent) => void,
+  signal = new AbortController().signal,
+  paths?: Awaited<ReturnType<typeof prepareWorkspaceFfmpeg>>,
+) {
+  const tools = paths ?? await prepareWorkspaceFfmpeg(signal);
+  await executeFfmpegInWorker(cwd, tools, request, emit, signal);
 }
 
 export function getProgress() {

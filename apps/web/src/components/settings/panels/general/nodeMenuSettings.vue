@@ -120,6 +120,7 @@
 
 <script setup lang="ts">
 import axios from "axios";
+import { translate } from "@toonflow/i18n/vue";
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue";
 import { ElMessage, type InputInstance } from "element-plus";
 import { IconBox, IconFolder, IconFolderOpen, IconFolderMinus, IconRestore, IconChevronRight, IconEdit, IconEye, IconEyeOff, IconPlus, IconDragDrop, IconFileText, IconPhoto, IconVideo, IconMusic, IconMusicBolt, IconCube3dSphere, IconPhotoAi, IconCameraAi } from "@tabler/icons-vue";
@@ -129,7 +130,7 @@ import { generalSettings, updateGeneralSettings } from "@/stores/settings";
 type MenuEntry = { item: NodeMenuItem; parentId: string; depth: number; siblings: NodeMenuItem[]; index: number; path: string[] };
 type MenuColumn = { id: string; depth: number; label: string; items: NodeMenuItem[] };
 type DropTarget = { parentId: string; index: number; itemId?: string; mode: "before" | "after" | "inside" | "end" };
-const levelNames = ["一级", "二级", "三级"];
+const levelNames = computed(() => [translate("一级"), translate("二级"), translate("三级")]);
 const nodeIcons: Record<string, Component> = {
   "remote-textNode": IconFileText,
   "remote-imageNode": IconPhoto,

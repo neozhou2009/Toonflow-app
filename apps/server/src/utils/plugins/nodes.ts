@@ -36,6 +36,7 @@ export async function readNode(name: string) {
   if (!rules.success) throw Object.assign(new Error("节点配置表单规则无效，请重新构建节点"), { status: 400 });
   return {
     name,
+    installedAt: conf.get("pluginInstalledAt", {})[`node:${name}`] ?? file.mtimeMs,
     displayName: typeof metadata.displayName === "string" && metadata.displayName.trim() ? metadata.displayName : name,
     version: typeof metadata.version === "string" ? metadata.version.trim() : "",
     author: typeof metadata.author === "string" ? metadata.author : "",

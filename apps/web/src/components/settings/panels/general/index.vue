@@ -1,5 +1,15 @@
 <template>
   <div class="general">
+    <ui />
+    <section class="settingSection" aria-labelledby="extensionAssociationsTitle">
+      <div class="settingHeader">
+        <div class="settingInfo">
+          <h3 id="extensionAssociationsTitle">默认打开方式</h3>
+          <p class="description">按文件类型选择默认扩展。</p>
+        </div>
+        <el-button size="small" aria-label="设置默认打开方式" @click="associationsVisible = true">设置</el-button>
+      </div>
+    </section>
     <section class="settingSection" aria-labelledby="startupTitle">
       <div class="settingHeader">
         <div class="settingInfo">
@@ -10,6 +20,29 @@
           :modelValue="uiSettings.startupAnimation"
           aria-label="启动动画"
           @change="(value) => updateUiSettings({ startupAnimation: value === true })" />
+      </div>
+    </section>
+    <section class="settingSection" aria-labelledby="agentNotificationsTitle">
+      <div class="settingHeader">
+        <div class="settingInfo">
+          <h3 id="agentNotificationsTitle">Agent 通知</h3>
+          <p class="description">
+            窗口未激活时，Agent 完成回答或等待确认会发送通知。
+            <template v-if="!actualPlatform.isDesktop && generalSettings.agentNotificationsEnabled">
+              <template v-if="notificationPermission === 'default'">
+                浏览器需授权，<el-button class="permissionAction" link type="primary" :loading="requestingPermission" @click="authorizeNotifications">点击授权</el-button>。
+              </template>
+              <template v-else-if="notificationPermission === 'granted'">浏览器已授权。</template>
+              <template v-else-if="notificationPermission === 'denied'">请在浏览器的网站设置中允许通知。</template>
+              <template v-else-if="notificationPermission === 'insecure'">浏览器通知需要 HTTPS 或 localhost。</template>
+              <template v-else>当前浏览器不支持系统通知。</template>
+            </template>
+          </p>
+        </div>
+        <el-switch
+          :modelValue="generalSettings.agentNotificationsEnabled"
+          aria-label="Agent 通知"
+          @change="(value) => updateGeneralSettings({ agentNotificationsEnabled: value === true })" />
       </div>
     </section>
     <section class="settingSection" aria-labelledby="canvasCompositingTitle">
@@ -62,13 +95,39 @@
     </section>
     <nodeMenuSettings />
     <canvasShortcuts />
+    <extensionAssociationsDialog v-model="associationsVisible" />
   </div>
 </template>
 
 <script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref } from "vue";
+import { ElMessage } from "element-plus";
 import { defaultUiSettings, generalSettings, uiSettings, updateGeneralSettings, updateUiSettings } from "@/stores/settings";
+import { getNotificationPermission, requestNotificationPermission } from "@/lib/notification";
+import { actualPlatform } from "@/lib/platform";
+import ui from "./ui.vue";
 import canvasShortcuts from "./canvasShortcuts.vue";
 import nodeMenuSettings from "./nodeMenuSettings.vue";
+import extensionAssociationsDialog from "./extensionAssociationsDialog.vue";
+
+const associationsVisible = ref(false);
+const notificationPermission = ref(getNotificationPermission());
+const requestingPermission = ref(false);
+
+function refreshNotificationPermission() {
+  notificationPermission.value = getNotificationPermission();
+}
+
+async function authorizeNotifications() {
+  if (requestingPermission.value) return;
+  requestingPermission.value = true;
+  try { notificationPermission.value = await requestNotificationPermission(); }
+  catch { ElMessage.error("请求通知授权失败，请检查浏览器的网站设置"); }
+  finally { requestingPermission.value = false; }
+}
+
+onMounted(() => window.addEventListener("focus", refreshNotificationPermission));
+onBeforeUnmount(() => window.removeEventListener("focus", refreshNotificationPermission));
 </script>
 
 <style lang="scss" scoped>
@@ -111,6 +170,12 @@ import nodeMenuSettings from "./nodeMenuSettings.vue";
           color: var(--el-text-color-secondary);
           font-size: 12px;
           line-height: 1.6;
+
+          .permissionAction {
+            padding: 0;
+            font-size: inherit;
+            vertical-align: baseline;
+          }
         }
       }
     }

@@ -25,10 +25,10 @@ export async function createSubAgentTool({ cwd, tools, canvas, runTask, ...model
   const teams = (await listTeams()).filter(team => team.enabled && !team.loadError);
   const subAgentTool: ToolDefinition = {
     name: "subAgent", label: "子任务与团队",
-    description: `并行执行委派的独立任务。省略 team 创建可继续对话的子 Agent，继承宿主工具，包括提问、继续委派和 report 上报；指定 team 调用已安装团队或外部 A2A。宿主工具：${[...tools.map(tool => tool.name), "subAgent"].join("、")}。团队目录：${JSON.stringify(teams.map(({ name, description, kind }) => ({ name, description, kind })))}。本地团队按清单分工。任务数量、并发数、执行轮次和总时长不设固定上限，可由用户停止。`,
+    description: `并行执行委派任务。省略 team 创建可继续对话的子 Agent，继承宿主工具，包括提问、继续委派、report 上报以及 listAgents/sendAgentMessage 队友通讯；返回 file 可用于后续联系。指定 team 调用已安装团队或外部 A2A。宿主工具：${[...tools.map(tool => tool.name), "subAgent"].join("、")}。团队目录：${JSON.stringify(teams.map(({ name, description, kind }) => ({ name, description, kind })))}。本地团队按清单分工。任务数量、并发数、执行轮次和总时长不设固定上限，可由用户停止。`,
     promptSnippet: "按需使用 subAgent 委派独立工作，或指定已安装 team 调用专用团队。",
     promptGuidelines: [
-      "简单任务直接完成；只委派相互独立的工作，提供必要背景和真实授权。并行任务不得修改同一文件或画布，依赖任务分次处理。",
+      "简单任务直接完成；委派时提供必要背景和真实授权。并行任务不得修改同一文件或画布；需要交换信息时，子 Agent 使用 listAgents 与 sendAgentMessage 直接协调，拿到依赖结果后再执行。",
       "委派不扩大权限或消耗算力授权。远端团队会收到 task 文本，仅发送完成任务所需且获准分享的内容；不能访问本机工具或未发送的文件。",
       "核验结果和 status；inputRequired 表示等待补充，应向用户确认后带原 taskId/contextId 继续该远端团队。错误、取消、达到限制均不等于完成，不自动重试可能已经产生副作用的任务。",
     ],

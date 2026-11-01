@@ -103,6 +103,6 @@ export function decodeTextFile(bytes: Uint8Array): string {
     if (text.includes("\0")) throw new Error("binary");
     return text;
   } catch {
-    throw new Error("文件不是受支持的 UTF-8 或带 BOM 的 UTF-16 文本，请先转换编码后重试");
+    throw new Error("无法读取文本：仅支持 UTF-8 或带 BOM 的 UTF-16 编码，请转换编码后重试。");
   }
 }

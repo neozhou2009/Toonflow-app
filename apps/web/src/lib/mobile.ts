@@ -1,11 +1,11 @@
 import { computed, ref } from "vue";
 import axios from "axios";
 import { t, translate } from "@toonflow/i18n/vue";
-import { isMobile, isDesktop, isRemoteConnection } from "./platform";
+import { actualPlatform } from "./platform";
 
 type MobileConnection = { mode: "local" | "remote"; name?: string; url?: string; online?: boolean | null; appVersion?: string; remoteAppVersion?: string };
 
-export const mobileConnection = ref<MobileConnection>({ mode: isRemoteConnection ? "remote" : "local" });
+export const mobileConnection = ref<MobileConnection>({ mode: actualPlatform.isRemoteConnection ? "remote" : "local" });
 export const deviceHubEnabled = ref(false);
 export const deviceConnectionSupported = ref(true);
 export function getDeviceVersionWarning(appVersion?: string, remoteAppVersion?: string) {
@@ -34,7 +34,7 @@ export async function refreshMobileConnection() {
       let data: MobileConnection = { mode: "local" };
       if (deviceConnectionSupported.value) {
         const response = await fetch("/api/connection/connection", { cache: "no-store", signal: request.signal });
-        if (response.status === 404 && !isMobile && !isDesktop) deviceConnectionSupported.value = false;
+        if (response.status === 404 && !actualPlatform.isMobile && !actualPlatform.isDesktop) deviceConnectionSupported.value = false;
         else {
           if (!response.ok) throw new Error("无法读取设备连接状态，请重试");
           data = await response.json() as MobileConnection;
@@ -42,7 +42,7 @@ export async function refreshMobileConnection() {
       }
       if (data.mode !== "local" && data.mode !== "remote") throw new Error("设备连接状态无效，请重试");
       mobileConnection.value = data;
-      if (!isMobile && data.mode === "local") {
+      if (!actualPlatform.isMobile && data.mode === "local") {
         const status = await fetch("/api/mobileLink/status", { headers: { "x-toonflow-mobile-link": "1" }, cache: "no-store", signal: request.signal });
         if (status.ok) {
           const body = await status.json() as { code?: number; data?: { enabled?: boolean; hubEnabled?: boolean } };

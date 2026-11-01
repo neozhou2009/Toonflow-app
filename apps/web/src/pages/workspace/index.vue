@@ -130,6 +130,7 @@
 </template>
 
 <script setup lang="ts">
+import { translate } from "@toonflow/i18n/vue";
 import { computed, defineAsyncComponent, nextTick, onMounted, onScopeDispose, provide, ref, shallowRef, watch, type ComponentPublicInstance } from "vue";
 import { onBeforeRouteLeave } from "vue-router";
 import axios from "axios";
@@ -283,7 +284,7 @@ onBeforeRouteLeave(async () => {
       ? error.response?.data?.message || error.message
       : error instanceof Error
       ? error.message
-      : "项目保存失败";
+      : translate("项目保存失败");
     const leave = await ElMessageBox.confirm(`无法保存项目：${message}。文件或目录可能已被移动或删除。仍然退出将丢弃尚未保存的修改。`, "项目未保存", {
       type: "warning",
       confirmButtonText: "仍然退出",

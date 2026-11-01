@@ -1,4 +1,6 @@
-const isMac = globalThis.navigator?.platform?.includes("Mac") ?? false;
+import { isMac } from "./platform";
+import { t } from "@toonflow/i18n/vue";
+
 const primaryModifier = isMac ? "Meta" : "Ctrl";
 const modifiers = ["Ctrl", "Alt", "Shift", "Meta"];
 
@@ -126,5 +128,5 @@ export function shortcutPressed(event: Pick<KeyboardEvent, "ctrlKey" | "altKey" 
 
 export function shortcutLabel(binding: string) {
   return getShortcutBindings(binding).map(value => value.split("+")
-    .map(part => keyLabels[part] ?? part.replace(/^(?:Key|Digit)/, "").replace(/^Numpad/, "小键盘 ")).join(" + ")).join(" / ");
+    .map(part => keyLabels[part] ?? (part.startsWith("Numpad") ? t`小键盘 ${part.slice(6)}` : part.replace(/^(?:Key|Digit)/, ""))).join(" + ")).join(" / ");
 }

@@ -51,10 +51,10 @@
         <div v-if="frameMode" class="referenceHint">
           {{ selectedMode === "startFrameOptional" ? "仅一张图片时作为尾帧；两张图片按顺序作为首帧、尾帧" : "图片引用按顺序作为首帧、尾帧" }}
         </div>
-        <promptInput v-model="data.promptModel" v-model:text="data.prompt" :references="referenceMentions" expandable />
+        <promptInput v-model="data.promptModel" v-model:text="data.prompt" :references="referenceMentions" :materials="materialMentions" :selectMaterial="selectMaterialReference" :selectAsset="selectAssetReference" expandable />
         <div class="promptFooter">
           <el-select
-            v-model="data.model"
+            :modelValue="selectedModel ? data.model : ''"
             class="modelSelect"
             filterable
             :loading="modelsLoading"
@@ -63,14 +63,18 @@
             aria-label="生成模型"
             noDataText="请先在设置中添加视频模型"
             placement="top-start"
+            @update:modelValue="data.model = $event"
             @visible-change="(visible) => visible && loadModels().catch((error) => showNodeError(error, '模型读取失败'))">
-            <template #prefix><icon-sparkles :size="17" /></template>
+            <template v-if="!selectedModel" #prefix><icon-sparkles :size="17" /></template>
+            <template #label="{ label }"><modelLabel :label="label" :providerId="selectedModel?.providerId" :modelId="selectedModel?.modelId" /></template>
             <el-option-group v-for="provider in modelGroups" :key="provider.id" :label="provider.label">
               <el-option
                 v-for="item in provider.models"
                 :key="item.modelId"
                 :label="item.label"
-                :value="JSON.stringify([item.providerId, item.modelId])" />
+                :value="JSON.stringify([item.providerId, item.modelId])">
+                <modelLabel :label="item.label" :providerId="item.providerId" :modelId="item.modelId" />
+              </el-option>
             </el-option-group>
           </el-select>
           <generationSettings
@@ -79,18 +83,20 @@
             v-model:ratio="data.ratio"
             v-model:mode="data.mode"
             v-model:generateAudio="data.generateAudio"
+            v-model:other="data.other"
             :ratios="ratioOptions"
             :model="selectedModel"
             :disabled="generating || deleting || !selectedModel" />
           <div class="generationActions">
             <mediaPrice v-if="generationInput" :input="{ ...generationInput, mediaType: 'video' }" :supported="selectedModel?.supportsPrice === true" />
+            <el-button v-if="pendingRecovery" class="sendButton" :icon="IconPlayerStop" :loading="cancelling" :disabled="deleting || uploading" title="放弃任务" aria-label="放弃任务" @click="generationState.cancel().catch(error => showNodeError(error, '停止生成失败'))" />
             <el-button
               class="sendButton"
               :icon="generating ? IconPlayerStop : IconArrowUp"
-              :disabled="deleting || uploading || (!generating && (!generationPrompt || !selectedModel))"
-              :title="generating ? '停止生成' : '生成视频'"
-              :aria-label="generating ? '停止生成' : '生成视频'"
-              @click="generating ? generationController?.abort() : startGeneration().catch((error) => showNodeError(error, '视频生成失败'))" />
+              :disabled="cancelling || deleting || uploading || (!generating && !pendingRecovery && (!generationPrompt || !selectedModel))"
+              :title="generating ? '停止生成' : pendingRecovery ? '复查任务' : '生成视频'"
+              :aria-label="generating ? '停止生成' : pendingRecovery ? '复查任务' : '生成视频'"
+              @click="generating ? generationState.cancel().catch(error => showNodeError(error, '停止生成失败')) : startGeneration().catch((error) => showNodeError(error, '视频生成失败'))" />
           </div>
         </div>
       </el-card>
@@ -100,16 +106,20 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onScopeDispose, ref, shallowRef, watch } from "vue";
 import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElLoading, ElDropdown, ElDropdownMenu, ElDropdownItem } from "element-plus";
 import { IconCameraAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer, IconMusic, IconLayersSubtract, IconScissors, IconMovie, IconPhotoScan, IconPlayerSkipBack, IconPlayerSkipForward } from "@tabler/icons-vue";
 import { nodeSkeleton, nodeTools, useNode, z, type NodeMediaModel, type NodeVideoRequest, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
 import { groupNodeModels } from "@toonflow/node-shared/groupNodeModels";
+import modelLabel from "@toonflow/node-shared/modelLabel";
 import { showNodeError } from "@toonflow/node-shared/showNodeError";
 import { useNodeGeneration } from "@toonflow/node-shared/useNodeGeneration";
+import { useModelForm } from "@toonflow/node-shared/useModelForm";
 import { useNodeReferences } from "@toonflow/node-shared/useNodeReferences";
+import { getPromptText } from "@toonflow/node-shared/promptText";
 import promptInput from "@toonflow/node-shared/promptInput";
 import videoPlayer from "@toonflow/node-video/videoPlayer";
+import { getMediaMimeType } from "@toonflow/node-shared/mediaTypes";
 import videoActions from "@toonflow/node-video/videoActions";
 import referenceItem from "@toonflow/node-shared/referenceItem";
 import mediaHistory from "@toonflow/node-shared/mediaHistory";
@@ -129,7 +139,7 @@ const { id, node, nodeProps, nodeEvent, outputs, files, ai, updateNodeInternals 
   label: "视频生成",
 });
 type PromptModel = NonNullable<InstanceType<typeof promptInput>["$props"]["modelValue"]>;
-const data = computed(() => node.data as { prompt: string; promptModel: PromptModel; model: string; duration?: number; resolution: string; ratio: string; mode: string; generateAudio: boolean });
+const data = computed(() => node.data as { prompt: string; promptModel: PromptModel; model: string; duration?: number; resolution: string; ratio: string; mode: string; generateAudio: boolean; other: Record<string, unknown> });
 data.value.prompt ??= "";
 data.value.promptModel ??= [];
 data.value.model ??= "";
@@ -137,8 +147,9 @@ data.value.resolution ??= "";
 data.value.mode ??= "";
 data.value.generateAudio ??= true;
 data.value.ratio ??= "9:16";
-const { refList, referenceMentions, setReferencePreview, removeReference } = useNodeReferences();
-const models = ref<NodeMediaModel[]>([]);
+data.value.other ??= {};
+const { refList, referenceMentions, materialMentions, selectMaterialReference, selectAssetReference, setReferencePreview, removeReference } = useNodeReferences();
+const models = shallowRef<NodeMediaModel[]>([]);
 const modelsLoading = ref(false);
 const uploading = ref(false);
 const fileInput = ref<HTMLInputElement>();
@@ -148,13 +159,15 @@ const player = ref<InstanceType<typeof videoPlayer>>();
 const actions = ref<InstanceType<typeof videoActions>>();
 const videoWidth = ref(0);
 let generationController: AbortController | undefined;
-const generationState = useNodeGeneration(outputs, () => generationController?.abort());
-const { generating } = generationState;
+const generationState = useNodeGeneration(outputs, () => generationController?.abort(), { ai });
+const { generating, pendingRecovery, cancelling } = generationState;
 let generation: Promise<void> | undefined;
 let modelsRequest: Promise<void> | undefined;
+watch(generating, value => { if (!value && !disposed && !deleting.value && !models.value.length) void loadModels().catch(error => showNodeError(error, "模型读取失败")); });
 // ACT: 供应商未声明视频比例范围，沿用界面的通用比例，具体支持范围由供应商校验。
 const ratioOptions = ["16:9", "9:16", "1:1", "4:3", "3:4"];
 const selectedModel = computed(() => models.value.find((item) => JSON.stringify([item.providerId, item.modelId]) === data.value.model));
+useModelForm(data, selectedModel);
 const selectedMode = computed(() => selectedModel.value?.mode?.find((item) => JSON.stringify(item) === data.value.mode) as NodeVideoRequest["mode"]);
 const frameMode = computed(() => ["startEndRequired", "endFrameOptional", "startFrameOptional"].includes(String(selectedMode.value)));
 const mediaCounts = computed(() => ({
@@ -207,35 +220,61 @@ watch([selectedModel, () => data.value.duration], ([choice]) => {
   if (choice.audio !== "optional") data.value.generateAudio = choice.audio === true;
 }, { flush: "sync" });
 const modelGroups = computed(() => groupNodeModels(models.value));
-const generationPrompt = computed(() =>
-  [
-    data.value.prompt.trim(),
-    ...refList.value.flatMap((item, index) => (item.dataType === "STRING" && item.value?.trim() ? [`参考 ${index + 1}：\n${item.value.trim()}`] : [])),
+function getGenerationPrompt(prompt: string, references = refList.value) {
+  return [
+    prompt.trim(),
+    ...references.flatMap((item, index) => (item.dataType === "STRING" && item.value?.trim() ? [`参考 ${index + 1}：\n${item.value.trim()}`] : [])),
   ]
     .filter(Boolean)
-    .join("\n\n")
-);
-const generationInput = computed<Omit<NodeVideoRequest, "directory"> | undefined>(() => {
+    .join("\n\n");
+}
+const generationPrompt = computed(() => getGenerationPrompt(data.value.prompt));
+const generationInput = computed(() => getGenerationInput(data.value.prompt));
+
+function getGenerationInput(prompt: string): Omit<NodeVideoRequest, "directory"> | undefined {
   const choice = selectedModel.value;
   if (!choice) return;
-  const images = refList.value.flatMap(item => item.dataType === "IMAGE" && item.value ? [{ path: item.value.url, mimeType: item.value.mimeType }] : []);
+  const references = refList.value;
+  const images: NonNullable<NodeVideoRequest["images"]> = [];
+  const videos: NonNullable<NodeVideoRequest["videos"]> = [];
+  const audios: NonNullable<NodeVideoRequest["audios"]> = [];
+  const referenceOrder: NonNullable<NodeVideoRequest["referenceOrder"]> = references.map(item => {
+    if (item.dataType === "IMAGE" && item.value) {
+      const index = images.push({ path: item.value.url, mimeType: item.value.mimeType }) - 1;
+      return { type: "image", index };
+    }
+    if (item.dataType === "VIDEO" && item.value) {
+      const index = videos.push({ path: item.value.url, mimeType: item.value.mimeType }) - 1;
+      return { type: "video", index };
+    }
+    if (item.dataType === "AUDIO" && item.value) {
+      const index = audios.push({ path: item.value.url, mimeType: item.value.mimeType }) - 1;
+      return { type: "audio", index };
+    }
+    return { type: "text" };
+  });
+  const firstFrame = frameMode.value && (selectedMode.value !== "startFrameOptional" || images.length > 1) ? images[0] : undefined;
+  const lastFrame = frameMode.value ? images[selectedMode.value === "startFrameOptional" && images.length === 1 ? 0 : 1] : undefined;
   return {
     providerId: choice.providerId,
     modelId: choice.modelId,
-    prompt: generationPrompt.value,
+    prompt: getGenerationPrompt(prompt, references),
     mode: selectedMode.value,
     duration: data.value.duration,
     resolution: data.value.resolution || undefined,
     ratio: data.value.ratio,
     generateAudio: choice.audio === "optional" ? data.value.generateAudio : choice.audio,
+    other: Object.keys(data.value.other).length ? { ...data.value.other } : undefined,
     outputDirectory: `assets/${id}`,
     images: frameMode.value ? undefined : images,
-    firstFrame: frameMode.value && (selectedMode.value !== "startFrameOptional" || images.length > 1) ? images[0] : undefined,
-    lastFrame: frameMode.value ? images[selectedMode.value === "startFrameOptional" && images.length === 1 ? 0 : 1] : undefined,
-    videos: refList.value.flatMap(item => item.dataType === "VIDEO" && item.value ? [{ path: item.value.url, mimeType: item.value.mimeType }] : []),
-    audios: refList.value.flatMap(item => item.dataType === "AUDIO" && item.value ? [{ path: item.value.url, mimeType: item.value.mimeType }] : []),
+    firstFrame,
+    lastFrame,
+    videos,
+    audios,
+    referenceOrder: referenceOrder.map(reference => frameMode.value && reference.type === "image"
+      ? { type: reference.index === 0 && firstFrame ? "firstFrame" : "lastFrame" } : reference),
   };
-});
+}
 const outputFile = computed(() => outputs.value.video?.dataType === "VIDEO" ? outputs.value.video.value : undefined);
 const previewUrl = files.useFileUrl(
   outputFile,
@@ -269,7 +308,8 @@ async function replaceOutput(event: Event) {
   const file = input.files?.[0];
   input.value = "";
   if (!file || generating.value || deleting.value || uploading.value || disposed) return;
-  if (!file.type.startsWith("video/")) return void showNodeError("请选择视频文件", "视频替换失败");
+  const mimeType = getMediaMimeType(file);
+  if (!mimeType.startsWith("video/")) return void showNodeError("请选择视频文件", "视频替换失败");
   if (!file.size || file.size > 100 * 1024 * 1024) return void showNodeError("视频不能为空且不能超过 100 MB", "视频替换失败");
   uploading.value = true;
   try {
@@ -280,7 +320,7 @@ async function replaceOutput(event: Event) {
       return;
     }
     // ACT: 保留历史输出文件，避免破坏撤销记录和复制节点的引用。
-    outputs.value.video = { dataType: "VIDEO", value: { url, mimeType: file.type } };
+    outputs.value.video = { dataType: "VIDEO", value: { url, mimeType } };
   } catch (error) {
     showNodeError(error, "视频替换失败");
   } finally {
@@ -296,7 +336,7 @@ function loadModels() {
     models.value = items.filter((item) => item.type === "video");
     // ACT: 只给空配置选默认模型，保留暂时不可用的旧选择及其参数。
     if (!data.value.model) {
-      const first = models.value[0];
+      const first = modelGroups.value[0]?.models[0];
       data.value.model = first ? JSON.stringify([first.providerId, first.modelId]) : "";
     }
   }).finally(() => {
@@ -307,24 +347,40 @@ function loadModels() {
 }
 
 async function startGeneration() {
-  const choice = selectedModel.value;
-  const input = generationInput.value;
+  if (cancelling.value) throw new Error("任务正在取消，请稍后重试");
   if (generating.value) throw new Error("视频正在生成，请等待完成");
   if (uploading.value) throw new Error("视频正在替换，请等待完成");
   if (deleting.value) throw new Error("节点正在删除");
+  if (pendingRecovery.value) {
+    generation = generationState.resume().catch(error => showNodeError(error, "视频任务复查失败"));
+    return { status: "generating" };
+  }
+  const choice = selectedModel.value;
+  // ACT: 提交时按稳定 ID 解析，避免依赖编辑器挂载及异步重排同步。
+  const references = referenceMentions.value;
+  const prompt = data.value.promptModel.length ? getPromptText(data.value.promptModel, referenceId => {
+    const value = references.find(reference => reference.id === referenceId)?.value;
+    if (value === undefined) throw new Error("提示词引用的素材已失效，请重新选择引用");
+    return value;
+  }) : data.value.prompt;
+  const input = getGenerationInput(prompt);
   if (!choice || !input) throw new Error("请先选择视频模型");
-  if (!generationPrompt.value) throw new Error("请输入生成提示词");
+  if (!input.prompt) throw new Error("请输入生成提示词");
   if (refList.value.some(item => item.value === undefined)) throw new Error("引用节点暂无内容，请先补充引用内容");
+  for (const match of input.prompt.matchAll(/\{\{ref (\d+)\}\}/g)) {
+    const reference = refList.value[Number(match[1]) - 1];
+    if (reference?.dataType === "STRING" && !reference.value?.trim()) throw new Error(`参考 ${match[1]} 的文本为空，请补充内容或移除提示词中的引用`);
+  }
   if (choice.mode?.length && !matchingModes.value.length) throw new Error("当前模型没有适合这些参考素材的生成模式，请更换模型或调整引用");
   const workspace = files.getWorkspaceFiles();
   const controller = new AbortController();
   generationController = controller;
-  // ACT: 工具立即返回，任务由节点持有，停止或卸载时取消。
+  // ACT: 工具立即返回；任务身份先保存，卸载只停止等待，重新打开后复查。
   generation = generationState.run(() => workspace
     .list()
     .then(({ directory }) => {
       controller.signal.throwIfAborted();
-      return ai.generateVideo({ ...input, directory }, controller.signal);
+      return generationState.generate("video", { ...input, directory }, controller.signal);
     })
     .then(([result]) => {
       controller.signal.throwIfAborted();
@@ -344,8 +400,8 @@ nodeEvent.on("save", (reason) => {
 nodeEvent.on("delete", async () => {
   if (uploading.value) throw new Error("视频正在替换，请稍后删除节点");
   deleting.value = true;
-  generationController?.abort();
   try {
+    await generationState.cancel(false);
     await generation;
     await files.removeNodeFiles();
   } finally {
@@ -371,6 +427,7 @@ function getConfig() {
       ratio: data.value.ratio,
       mode: selectedMode.value,
       generateAudio: data.value.generateAudio,
+      other: data.value.other,
     },
     models: models.value,
     ratios: ratioOptions,
@@ -431,7 +488,7 @@ nodeTools.register({
 
 nodeTools.register({
   name: "setPrompt",
-  description: "修改此节点的视频生成提示词，支持 {{ref 1}} 等参考标记；只修改提示词，不启动生成",
+  description: "修改此节点的视频生成提示词，仅接收 prompt，支持 {{ref 1}} 等参考标记；时长 duration、分辨率等配置须先用 node:getConfig 查询能力，再单独调用 node:setConfig；不启动生成",
   parameters: z.strictObject({ prompt: z.string() }),
   execute({ prompt: value }) {
     if (deleting.value) throw new Error("节点正在删除，请稍后修改");
@@ -454,6 +511,15 @@ nodeTools.register({
 
 <style scoped lang="scss">
 .videoContent {
+  .nodeSkeleton.resized & {
+    height: 100%;
+    min-height: 0;
+    grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+    --nodeMediaHeight: 100%;
+
+    .videoEmpty { min-height: 0; height: 100%; }
+  }
+
   position: relative;
   display: grid;
   place-items: center;
@@ -488,7 +554,7 @@ nodeTools.register({
     gap: 12px;
 
     .modelSelect {
-      width: 190px;
+      width: 280px;
       min-width: 0;
 
       &:deep(.el-select__wrapper) {

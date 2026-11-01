@@ -12,7 +12,7 @@ const runNames = new Set<string>(runMethods);
 const inputNames = new Set(["input", "addInput", "mergeAdd"]);
 const outputNames = new Set(["output", "addOutput", "save", "saveToFile", "concat", "concatenate", "mergeToFile"]);
 
-function serializeError(error: unknown) {
+export function serializeError(error: unknown) {
   return error instanceof Error
     ? { name: error.name, message: error.message, ...("code" in error ? { code: error.code } : {}), ...("i18nMessage" in error ? { i18nMessage: error.i18nMessage } : {}) }
     : { name: "Error", message: String(error) };

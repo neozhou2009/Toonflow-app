@@ -141,7 +141,19 @@ export function getUnsupportedFileText(provider: FileProvider, file: { path: str
 }
 
 export function createFileTransport(provider: FileProvider, options: { fetch?: typeof fetch; signal?: AbortSignal } = {}): { prepare(payload: unknown): Promise<void>; fetch: typeof fetch } {
-  const request = options.fetch ?? globalThis.fetch;
+  const fetchRequest = options.fetch ?? globalThis.fetch;
+  const request = Object.assign((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    // 按 Request 接口读取，兼容原生和 Undici 实例；init.signal 覆盖原请求，整轮取消始终保留。
+    const inputRequest = typeof input === "object" && "url" in input ? input : undefined;
+    const headers = new Headers(init?.headers ?? inputRequest?.headers);
+    const signals = [options.signal, init?.signal === undefined ? inputRequest?.signal : init.signal].filter((signal): signal is AbortSignal => Boolean(signal));
+    const signal = signals.length ? AbortSignal.any(signals) : init?.signal;
+    signal?.throwIfAborted();
+    // ACT: 模型与附件请求共用此策略；Undici 不用 keepalive 控制连接池，必须显式关闭连接。
+    // 工具或用户等待期间代理可能回收 socket，不把它留给下一轮生成或重试。
+    headers.set("Connection", "close");
+    return fetchRequest(input, { ...init, headers, signal, keepalive: false });
+  }, fetchRequest);
   const adapter = adapters.find(adapter => adapter.accepts(provider));
   if (!adapter) return { prepare: async () => {}, fetch: request };
   const scope = hash(`${adapter.endpoint}\0${hash(provider.apiKey)}`);
@@ -225,18 +237,19 @@ export function createFileTransport(provider: FileProvider, options: { fetch?: t
   }
 
   const fetchFiles = Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    const url = new URL(input instanceof Request ? input.url : String(input));
+    const inputRequest = typeof input === "object" && "url" in input ? input : undefined;
+    const url = new URL(inputRequest?.url ?? String(input));
     if (url.origin !== new URL(adapter.endpoint).origin) return request(input, init);
-    const signals = [options.signal, init?.signal, input instanceof Request ? input.signal : undefined].filter((signal): signal is AbortSignal => Boolean(signal));
-    const signal = signals.length ? AbortSignal.any(signals) : undefined;
+    const signals = [options.signal, init?.signal === undefined ? inputRequest?.signal : init.signal].filter((signal): signal is AbortSignal => Boolean(signal));
+    const signal = signals.length ? AbortSignal.any(signals) : init?.signal;
     signal?.throwIfAborted();
-    const replayInput = input instanceof Request ? input.clone() : input;
-    const bodyText = typeof init?.body === "string" ? init.body : input instanceof Request && init?.body == null ? await input.clone().text() : undefined;
+    const replayInput = inputRequest ? inputRequest.clone() : input;
+    const bodyText = typeof init?.body === "string" ? init.body : inputRequest && init?.body == null ? await inputRequest.clone().text() : undefined;
     let body: unknown;
     try { body = bodyText ? JSON.parse(bodyText) : undefined; } catch {}
     const renewed = replaceFileIds(body, renewedFiles);
     const fileIds = [...new Set(referencedFileIds(body).filter(id => preparedFiles.has(id)))];
-    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    const headers = new Headers(init?.headers ?? inputRequest?.headers);
     if (fileIds.length) adapter.headers(provider.protocol, headers);
     if (renewed) headers.delete("content-length");
     // ACT: SDK 可能重用首次构建的 payload；后续网络重试也必须使用已更新的文件 ID。
@@ -260,7 +273,7 @@ export function createFileTransport(provider: FileProvider, options: { fetch?: t
           if (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
       });
-      const uploaded = await resolveFile(source, signal);
+      const uploaded = await resolveFile(source, signal ?? undefined);
       preparedFiles.set(uploaded.fileId, { ...source, ...uploaded });
       replacements.set(id, uploaded.fileId);
       renewedFiles.set(id, uploaded.fileId);

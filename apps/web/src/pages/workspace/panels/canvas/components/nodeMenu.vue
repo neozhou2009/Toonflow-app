@@ -17,6 +17,7 @@
     virtualTriggering
     :virtualRef="menuAnchor"
     placement="bottom-start"
+    :popperOptions="{ strategy: 'fixed', modifiers: [{ name: 'preventOverflow', options: { altAxis: true, padding: 8 } }] }"
     :showArrow="false"
     :showTimeout="0"
     :hideTimeout="0"
@@ -86,7 +87,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, shallowRef, type Component } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch, type Component } from "vue";
 import { useVueFlow, type ConnectingHandle, type GraphNode, type HandleType } from "@vue-flow/core";
 import { isTypeCompatible, useNodeEvent, validateConnection, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
 import { ElMessage } from "element-plus";
@@ -114,8 +115,9 @@ import {
   IconLayoutGrid,
 } from "@tabler/icons-vue";
 
-const { remoteNodes = [], pasteNode, uploadFiles, canUndo = false, canRedo = false, selectionBusy = false, batchHistory } = defineProps<{
+const { remoteNodes = [], disabled = false, pasteNode, uploadFiles, canUndo = false, canRedo = false, selectionBusy = false, batchHistory } = defineProps<{
   remoteNodes?: { type: string; label: string }[];
+  disabled?: boolean;
   pasteNode?: (position: { x: number; y: number }) => Promise<boolean>;
   uploadFiles?: (position: { x: number; y: number }) => void;
   canUndo?: boolean;
@@ -211,6 +213,11 @@ function startSelectionConnection() {
 }
 
 onBeforeUnmount(clearConnection);
+watch(() => disabled, value => {
+  if (!value) return;
+  menu.value?.handleClose();
+  clearConnection();
+});
 flow.onConnectStart(() => {
   pendingHandle.value = undefined;
   clearConnection();
@@ -232,11 +239,12 @@ flow.onConnectEnd((event) => {
 async function openMenu(event: MouseEvent | TouchEvent, nodesOnly = false, selection: GraphNode[] = [], handle?: DraggedHandle, group: GraphNode[] = []) {
   event.preventDefault();
   event.stopPropagation();
+  if (disabled) return;
   emit("history");
   menu.value?.handleClose();
   clearConnection();
   await nextTick();
-  if (!menu.value || (handle && flow.findNode(handle.node.id) !== handle.node)) return;
+  if (disabled || !menu.value || (handle && flow.findNode(handle.node.id) !== handle.node)) return;
   pendingHandle.value = handle;
   pendingGroup.value = group;
   directNodes.value = nodesOnly;
@@ -253,7 +261,7 @@ async function openMenu(event: MouseEvent | TouchEvent, nodesOnly = false, selec
     flow.startConnection(handle.start, { x: clientX - bounds.left, y: clientY - bounds.top });
   }
   await nextTick();
-  menu.value?.handleOpen();
+  if (!disabled) menu.value?.handleOpen();
 }
 
 onPaneContextMenu(openMenu);
@@ -274,6 +282,7 @@ async function addNode(type: string, position: { x: number; y: number }) {
 }
 
 async function handleCommand(command: unknown) {
+  if (disabled) return;
   if (command === "nodes" || command === "actions" || command === "selection" || command === "arrange") {
     if (command === "arrange" && !canArrangeSelection.value) return;
     menuLevel.value = command;
@@ -366,7 +375,7 @@ async function runCommand(command: unknown) {
       flow.removeSelectedElements();
       flow.addSelectedNodes(group);
       flow.nodesSelectionActive.value = true;
-      ElMessage.warning("该节点的接收规则不允许整组选中节点连接");
+      ElMessage.warning("目标节点的接收规则不允许整组连接，请尝试分别连接。");
     }
     return;
   }
@@ -393,7 +402,7 @@ async function runCommand(command: unknown) {
         validateConnection(item, { sourceNode, targetNode, nodes: flow.getNodes.value, edges: flow.getEdges.value })
     );
   if (connection) flow.addEdges(connection);
-  else ElMessage.warning("节点已创建，但没有兼容的端口可连接");
+  else ElMessage.warning("节点已创建，但没有兼容的端口可连接。");
   clearConnection();
   menu.value?.handleClose();
 }

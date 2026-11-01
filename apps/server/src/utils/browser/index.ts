@@ -5,8 +5,7 @@ import { getRuntimePlatform } from "@/lib/platform";
 export const browserRuntime = createBrowserRuntime();
 
 export function createBrowserContext(cwd: string): ToolContext["browser"] {
-  const platform = getRuntimePlatform();
-  if (!platform.desktop && !platform.development) return;
+  if (!getRuntimePlatform().browserSupported) return;
   return { execute: (sessionId, args, config, signal, onUpdate) => browserRuntime.execute(cwd, sessionId, args, config, signal, onUpdate) };
 }
 

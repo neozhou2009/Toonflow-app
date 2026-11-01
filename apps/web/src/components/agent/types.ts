@@ -1,4 +1,4 @@
-import type { AgentToolCall, AgentStats, AgentContext, AgentSubAgent, AgentMention } from "@toonflow/server/agent/types";
+import type { AgentToolCall, AgentStats, AgentContext, AgentSubAgent, AgentMention, AgentQueue, AgentMessageDelivery } from "@toonflow/server/agent/types";
 
 export type AgentAttachment = { name: string; path: string; mimeType: string; file?: File };
 
@@ -10,7 +10,9 @@ export type AgentMessagePart =
 export type AgentMessage = {
   id: string;
   entryId?: string;
+  queueId?: string;
   replyTo?: string;
+  delivery?: AgentMessageDelivery;
   role: "user" | "assistant";
   content: string;
   attachments?: AgentAttachment[];
@@ -19,6 +21,7 @@ export type AgentMessage = {
   streaming?: boolean;
   error?: string;
   report?: { file: string; name: string };
+  agentMessage?: { fromFile: string; fromName: string; toFile: string; toName: string; startsTurn?: boolean };
 };
 
 export type AgentHistory = { file: string; name: string; modified: string; messageCount: number };
@@ -35,4 +38,6 @@ export type AgentConversation = {
   parentFile?: string;
   subAgents?: AgentSubAgent[];
   running?: boolean;
+  runId?: string;
+  queue?: AgentQueue;
 };

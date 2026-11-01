@@ -509,7 +509,7 @@ async function refreshExtensions() {
       if (!enabled.has(session.extension.id)) {
         session.extensionDisabled = true;
         try { await closeEditor(id); }
-        catch (error) { session.context.error = `扩展已停用；为保留未保存内容，此标签仍保持打开。${documentError(error)}`; reportError(error); }
+        catch (error) { session.context.error = t`扩展已停用；为保留未保存内容，此标签仍保持打开。${documentError(error)}`; reportError(error); }
       } else {
         session.extensionDisabled = false;
         if (extensionVersions.get(id) !== extensionRevision(session.extension.id)) session.extensionChanged = true;

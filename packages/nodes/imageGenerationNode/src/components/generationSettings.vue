@@ -28,6 +28,7 @@
           </span>
         </el-button>
       </div>
+      <modelForm v-model="other" :rules="model?.rules" :disabled="disabled" />
     </div>
   </el-popover>
 </template>
@@ -36,11 +37,14 @@
 import { ref } from "vue";
 import { ElButton, ElPopover, ElRadioGroup, ElRadioButton } from "element-plus";
 import { IconChevronDown, IconChevronUp } from "@tabler/icons-vue";
+import type { NodeMediaModel } from "@toonflow/nodes-scaffold/runtime";
+import modelForm from "@toonflow/node-shared/modelForm";
 
-defineProps<{ sizes: string[]; ratios: string[]; disabled?: boolean }>();
+defineProps<{ sizes: string[]; ratios: string[]; model?: NodeMediaModel; disabled?: boolean }>();
 const settingsVisible = ref(false);
 const size = defineModel<string>("size", { required: true });
 const ratio = defineModel<string>("ratio", { required: true });
+const other = defineModel<Record<string, unknown>>("other", { required: true });
 
 function ratioStyle(value: string) {
   const [width = 1, height = 1] = value.split(":").map(Number);

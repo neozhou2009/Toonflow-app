@@ -14,6 +14,7 @@ const fogCanvas = ref<HTMLCanvasElement>();
 const events = new AbortController();
 const maskSize = 320;
 const fogPixelSize = 2;
+const step = 6;
 const pointer = { x: -1000, y: -1000, targetX: -1000, targetY: -1000, strength: 0, targetStrength: 0 };
 let context: CanvasRenderingContext2D | null = null;
 let fogLayer: HTMLCanvasElement;
@@ -30,7 +31,6 @@ let elapsed = 9;
 let lastFrame = 0;
 let width = 0;
 let height = 0;
-let step = 6;
 let pixelRatio = 1;
 let inkColor = "";
 
@@ -86,15 +86,14 @@ function resize() {
   fogLayer.width = Math.ceil(width / fogPixelSize);
   fogLayer.height = Math.ceil(height / fogPixelSize);
   fogPixels = fogContext!.createImageData(fogLayer.width, fogLayer.height);
-  // ACT: 保留最多 30000 个点的雾带密度；颗粒尺寸单独控制，避免随大屏点距一起变粗。
-  step = Math.max(4, Math.sqrt(width * height / 30000));
+  // ACT: 颗粒和点距都按 CSS 像素固定，点数随可视面积变化，避免窗口大小改变疏密。
   points = [];
-  for (let x = step / 2; x < width && points.length < 30000; x += step) {
-    for (let y = step / 2; y < height && points.length < 30000; y += step) {
+  for (let x = step / 2; x < width; x += step) {
+    for (let y = step / 2; y < height; y += step) {
       const seed = Math.sin(x * 18.23 + y * 73.17) * 43758.55;
       points.push({ x, y, nx: x / width, ny: y / height, ink: 0,
         halo: 0, variation: 0.82 + (seed - Math.floor(seed)) * 0.18,
-        pixelIndex: (Math.floor(y / height * fogLayer.height) * fogLayer.width + Math.floor(x / width * fogLayer.width)) * 4 + 3 });
+        pixelIndex: (Math.floor(y / fogPixelSize) * fogLayer.width + Math.floor(x / fogPixelSize)) * 4 + 3 });
     }
   }
   updateScrollPoints();
@@ -161,7 +160,7 @@ function draw() {
   }
   // ACT: 点阵统一写入离屏掩膜后批量绘制，避免逐点调用 Canvas fillRect。
   fogContext.putImageData(fogPixels, 0, 0);
-  context.drawImage(fogLayer, 0, 0, width, height);
+  context.drawImage(fogLayer, 0, 0, fogLayer.width * fogPixelSize, fogLayer.height * fogPixelSize);
   context.globalCompositeOperation = "source-in";
   context.fillStyle = inkColor;
   context.fillRect(0, 0, width, height);

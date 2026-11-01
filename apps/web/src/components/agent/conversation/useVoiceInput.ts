@@ -1,5 +1,6 @@
 import { computed, onScopeDispose, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
+import { translate } from "@toonflow/i18n/vue";
 import { createBrowserAsr, isBrowserAsrSupported, type BrowserAsrState } from "@toonflow/asr";
 import type xSender from "x-sender";
 
@@ -136,7 +137,7 @@ export default function useVoiceInput(options: {
     if (!instance || options.locked() || !options.active() || instance.chatEditor.isComposition) return;
     if (!voiceSupported) {
       clearVoicePress();
-      ElMessage.warning("当前浏览器或 WebView 不支持原生语音识别");
+      ElMessage.warning("当前浏览器或 WebView 不支持原生语音识别，无法使用语音输入，请改用文字输入。");
       return;
     }
     try {
@@ -168,12 +169,12 @@ export default function useVoiceInput(options: {
           if (voiceAsr !== asr) return;
           console.warn("浏览器原生语音识别失败", { code, message, userAgent: navigator.userAgent });
           const errors: Record<string, string> = {
-            "not-allowed": "麦克风权限未获允许，请在浏览器或系统设置中开启",
-            "service-not-allowed": "当前浏览器或 WebView 未允许语音识别服务",
-            "audio-capture": "无法使用麦克风，请检查设备连接和占用情况",
-            "no-speech": "未检测到语音，请长按后说话",
-            "network": "浏览器内置语音服务连接失败（network），请检查该服务的网络访问",
-            "language-not-supported": "当前语音识别服务不支持中文",
+            "not-allowed": translate("麦克风权限未获允许，请在浏览器或系统设置中开启"),
+            "service-not-allowed": translate("当前浏览器或 WebView 未允许使用语音识别服务，暂时无法进行语音输入。"),
+            "audio-capture": translate("无法使用麦克风，请检查设备连接和占用情况"),
+            "no-speech": translate("未检测到语音，请长按后说话"),
+            "network": translate("浏览器内置语音服务连接失败（network），请检查网络是否能访问该服务。"),
+            "language-not-supported": translate("当前语音识别服务不支持中文"),
           };
           cancelVoiceInput();
           ElMessage.warning(errors[code] ?? `语音识别失败：${message}`);
@@ -204,7 +205,7 @@ export default function useVoiceInput(options: {
       else instance.focus("last");
       await instance.setText(text);
     } catch (error) {
-      ElMessage.error(error instanceof Error ? error.message : "语音文字回填失败");
+      ElMessage.error(error instanceof Error ? error.message : "语音文字回填失败，未能将识别结果填入输入框。");
     } finally {
       if (voiceAsr === asr) {
         voiceAsr = undefined;

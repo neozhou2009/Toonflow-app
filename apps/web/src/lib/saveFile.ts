@@ -1,6 +1,6 @@
 import axios from "axios";
 import { ElMessage } from "element-plus";
-import { isMobile, isDesktop } from "./platform";
+import { actualPlatform } from "./platform";
 
 declare global {
   interface WindowEventMap {
@@ -9,7 +9,7 @@ declare global {
 }
 
 export default async function saveFile(content: Blob | (() => Promise<Blob>), fileName: string): Promise<boolean> {
-  if (isMobile) {
+  if (actualPlatform.isMobile) {
     const blob = typeof content === "function" ? await content() : content;
     const { data } = await axios.post<{ url: string }>("/api/mobile/exports", blob, {
       params: { fileName }, headers: { "Content-Type": "application/octet-stream" },
@@ -33,7 +33,7 @@ export default async function saveFile(content: Blob | (() => Promise<Blob>), fi
       window.location.href = target.href;
     });
   }
-  if (isDesktop) {
+  if (actualPlatform.isDesktop) {
     const { data: selectData } = await axios.post<{ code: number; data: { token: string | null }; message?: string }>(
       "/api/desktop/selectSaveFile",
       { fileName },
@@ -81,6 +81,6 @@ export function registerDownloads() {
       link.dispatchEvent(new CustomEvent("downloadstate", { detail: false }));
     });
   }
-  if (isDesktop || isMobile) document.addEventListener("click", handleDownload, true);
+  if (actualPlatform.isDesktop || actualPlatform.isMobile) document.addEventListener("click", handleDownload, true);
   return () => document.removeEventListener("click", handleDownload, true);
 }

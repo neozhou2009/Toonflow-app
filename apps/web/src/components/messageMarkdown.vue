@@ -22,6 +22,7 @@
 
 <script setup lang="ts">
 import { computed, h } from "vue";
+import { translate } from "@toonflow/i18n/vue";
 import { Markdown, COMPONENT_RENDERERS, parseMarkdownIntoBlocks } from "vue-stream-markdown";
 import { MarkdownAstParser, postnormalize, type DefinitionNode, type ParsedNode, type SyntaxTree } from "@markmend/ast";
 import type { CodeOptions, ImageNodeRendererProps, LinkNodeRendererProps, ShikiOptions } from "vue-stream-markdown";
@@ -32,7 +33,7 @@ import markdownImage from "./markdownImage.vue";
 import { markdownLocale } from "@/lib/i18n";
 
 const { content, streaming = false, codeOptions, directory } = defineProps<{ content: string; streaming?: boolean; codeOptions?: CodeOptions; directory?: string }>();
-const renderImage = (image: ImageNodeRendererProps) => h(markdownImage, { image, directory: directory! });
+const renderImage = (image: ImageNodeRendererProps) => h(markdownImage, { image: { ...image }, directory: directory! });
 const nodeRenderers = computed(() => directory ? { image: renderImage, link: renderLink } : {});
 const shikiOptions: ShikiOptions = { theme: ["github-light", "github-dark"] };
 const cdnOptions = { shiki: false } as const;
@@ -53,7 +54,7 @@ function renderLink(link: LinkNodeRendererProps) {
     || !link.node.children.every(node => node.type === "text")) return renderedLink;
   return h("span", { class: "imageLink" }, [renderedLink, h("br"), renderImage({
     ...link, nodeKey: `${link.nodeKey}:image`,
-    node: { type: "image", url: url.href, alt: "网络图片", loading: link.markdownParser.hasLoadingNode([link.node]) },
+    node: { type: "image", url: url.href, alt: translate("网络图片"), loading: link.markdownParser.hasLoadingNode([link.node]) },
   })]);
 }
 
@@ -115,6 +116,10 @@ const chunks = computed(() => {
 
     & + .markdownChunk {
       margin-top: 12px;
+    }
+
+    :deep([data-stream-markdown="code-block-header"]) {
+      position: relative;
     }
   }
 }

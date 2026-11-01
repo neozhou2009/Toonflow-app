@@ -3,10 +3,10 @@ import { throttle } from "lodash-es";
 import type { AgentEvent } from "@toonflow/server/agent/types";
 import type { AgentMessage, AgentMessagePart } from "./types";
 
-export async function* readAgentEvents<T extends { type: string; message?: string } = AgentEvent>(response: Response, signal: AbortSignal) {
+export async function* readAgentEvents<T extends { type: string; message?: unknown } = AgentEvent>(response: Response, signal: AbortSignal) {
   if (!response.ok) {
     const error = await response.json().catch(() => null);
-    throw new Error(error?.message || `请求失败（${response.status}）`);
+    throw Object.assign(new Error(error?.message || `请求失败（${response.status}）`), { terminal: true });
   }
   if (!response.body) throw new Error("未收到响应流");
   const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
@@ -22,7 +22,7 @@ export async function* readAgentEvents<T extends { type: string; message?: strin
       for (const line of lines) {
         if (!line.trim()) continue;
         const event = JSON.parse(line) as T;
-        if (event.type === "error") throw new Error(event.message);
+        if (event.type === "error") throw Object.assign(new Error(typeof event.message === "string" ? event.message : "请求失败"), { terminal: true });
         if (event.type === "done") return;
         yield event;
         signal.throwIfAborted();
@@ -56,7 +56,20 @@ export function createReplyStream(reply: AgentMessage) {
     thinkingPart = undefined;
   }
 
-  function receive(event: Extract<AgentEvent, { type: "text" | "thinking" | "tool" | "question" }>) {
+  function receive(event: Extract<AgentEvent, { type: "text" | "thinking" | "tool" | "question" | "retry" }>) {
+    if (event.type === "retry") {
+      if (thinkingPart?.id.startsWith(event.blockPrefix)) thinkingPart = undefined;
+      for (let index = parts.length - 1; index >= 0; index--) {
+        const part = parts[index]!;
+        if (!part.id.startsWith(event.blockPrefix)) continue;
+        if (part.type !== "tool") pendingContent.delete(part);
+        parts.splice(index, 1);
+      }
+      if (!pendingContent.size) flushContent.cancel();
+      reply.content = parts.filter(part => part.type === "text").map(part => pendingContent.get(part) ?? part.content).join("\n\n");
+      reply.error = undefined;
+      return;
+    }
     if (event.type === "question") {
       const part = parts.find(part => part.type === "tool" && part.tool.id === event.toolCallId);
       if (part?.type !== "tool") throw new Error("提问缺少对应的工具调用");
@@ -112,6 +125,9 @@ export function createConversationStream(messages: Ref<AgentMessage[]>) {
 
   function finish() {
     stream?.finish();
+    if (reply && !reply.content.trim() && !reply.parts?.some(part => part.type === "tool" || part.content.trim()) && !reply.error) {
+      messages.value = messages.value.filter(message => message !== reply);
+    }
     stream = undefined;
     reply = undefined;
   }
@@ -125,9 +141,17 @@ export function createConversationStream(messages: Ref<AgentMessage[]>) {
   function ensureReply(userId?: string) {
     if (reply && userId && reply.replyTo && reply.replyTo !== userId) finish();
     if (!reply) {
-      const user = messages.value.findLast(message => message.role === "user");
-      const last = messages.value.findLast(message => message.role === "assistant" && message.streaming);
-      const message = last ?? reactive<AgentMessage>({ id: crypto.randomUUID(), role: "assistant", content: "", parts: [], streaming: true, replyTo: userId ?? user?.entryId });
+      const taskMessage = messages.value.findLast(message => message.agentMessage?.startsTurn
+        ? !userId || message.id === userId
+        : message.role === "user" && (userId ? message.entryId === userId : !message.queueId || !!message.entryId));
+      let last = messages.value.findLast(message => message.role === "assistant" && message.streaming);
+      if (last && userId && last.replyTo !== userId) {
+        begin(last);
+        finish();
+        last = undefined;
+      }
+      const message = last ?? reactive<AgentMessage>({ id: crypto.randomUUID(), role: "assistant", content: "", parts: [], streaming: true,
+        replyTo: userId ?? (taskMessage?.agentMessage ? taskMessage.id : taskMessage?.entryId), delivery: taskMessage?.delivery });
       if (!last) messages.value.push(message);
       begin(message);
     }
@@ -136,14 +160,28 @@ export function createConversationStream(messages: Ref<AgentMessage[]>) {
   }
 
   function receive(event: AgentEvent) {
-    if (event.type === "userMessage") {
-      const existing = messages.value.find(message => message.entryId === event.id)
-        ?? messages.value.find(message => message.role === "user" && !message.entryId && message.content === event.content);
-      if (existing) { existing.entryId = event.id; existing.error = undefined; existing.mentions = event.mentions; }
-      else messages.value.push({ id: event.id, entryId: event.id, role: "user", content: event.content ?? "", attachments: event.attachments, mentions: event.mentions });
+    if (event.type === "retry" && event.replyTo && reply?.replyTo !== event.replyTo) {
+      const previous = messages.value.findLast(message => message.role === "assistant" && message.replyTo === event.replyTo && !message.report && !message.agentMessage);
+      if (previous) createReplyStream(previous).receive(event);
+    } else if (event.type === "agentMessage" && event.startsTurn) {
       ensureReply(event.id);
-    } else if (["text", "thinking", "tool", "question"].includes(event.type)) {
-      ensureReply().receive(event as Extract<AgentEvent, { type: "text" | "thinking" | "tool" | "question" }>);
+      reply!.delivery = undefined;
+    } else if (event.type === "userMessage") {
+      const existing = messages.value.find(message => message.role === "user"
+        && (message.entryId === event.id || (event.queueId && message.queueId === event.queueId)));
+      if (existing) {
+        existing.entryId = event.id;
+        existing.queueId = event.queueId ?? existing.queueId;
+        existing.content = event.content ?? existing.content;
+        existing.attachments = event.attachments ?? existing.attachments;
+        existing.error = undefined;
+        existing.mentions = event.mentions;
+        existing.delivery = event.delivery;
+      } else messages.value.push({ id: event.id, entryId: event.id, queueId: event.queueId, role: "user", content: event.content ?? "", attachments: event.attachments, mentions: event.mentions, delivery: event.delivery });
+      ensureReply(event.id);
+      reply!.delivery = event.delivery;
+    } else if (["text", "thinking", "tool", "question", "retry"].includes(event.type)) {
+      ensureReply().receive(event as Extract<AgentEvent, { type: "text" | "thinking" | "tool" | "question" | "retry" }>);
     } else if (event.type === "error") {
       ensureReply();
       reply!.error = event.message;

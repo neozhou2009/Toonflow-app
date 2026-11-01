@@ -1,7 +1,8 @@
-import { constants, copyFile, cp, lstat, mkdir, rename, unlink, realpath, writeAtomic } from "@toonflow/file";
+import { constants, copyFile, cp, lstat, mkdir, open, readdir, rename, rm, rmdir, unlink, realpath, writeAtomic } from "@toonflow/file";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { Request } from "express";
 import { resolveWorkspace } from "@/utils/workspace";
+import { t, translateError, translateMessage } from "@/lib/i18n";
 
 export async function writeWorkspaceFile(path: string, content: string | Uint8Array, exclusive = false) {
   await writeAtomic(path, content, { exclusive });
@@ -29,7 +30,7 @@ export async function copyWorkspaceFile(source: string, target: string) {
     });
   } catch (cause) {
     // ACT: 失败保留已复制内容，不递归回滚删除可能被外部加入文件的目标目录。
-    throw Object.assign(new Error(`复制未完成，已复制的内容保留在 ${target}。${cause instanceof Error ? cause.message : "请检查文件权限后重试"}`, { cause }), { code: "ECOPYINCOMPLETE" });
+    throw Object.assign(new Error(t`复制未完成，已复制的内容保留在 ${target}。${cause instanceof Error ? translateError(cause) : translateMessage("请检查文件权限后重试")}`, { cause }), { code: "ECOPYINCOMPLETE" });
   }
 }
 
@@ -52,6 +53,52 @@ export async function renameWorkspaceFile(source: string, target: string) {
     await unlink(target).catch(error => console.warn(`重命名回滚失败：${target}`, error));
     throw err;
   }
+}
+
+async function hasCanvasFile(path: string, excludedPath?: string): Promise<boolean> {
+  if (excludedPath && isWithin(excludedPath, path)) return false;
+  const info = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+  if (!info) return false;
+  if (info.isDirectory()) {
+    for (const entry of await readdir(path, { withFileTypes: true })) {
+      if (entry.isDirectory() && ["assets", ".agent"].includes(entry.name.toLowerCase())) continue;
+      if ((entry.isFile() || entry.isDirectory()) && await hasCanvasFile(resolve(path, entry.name), excludedPath)) return true;
+    }
+    return false;
+  }
+  if (!info.isFile() || !/\.json$/i.test(path)) return false;
+  const file = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(4096);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+    const header = buffer.toString("utf8", 0, bytesRead);
+    if (!/^\s*\{/.test(header)) return false;
+    // ACT: 与前端一致，只快速识别根对象首字段；其他顺序完整解析，避免嵌套标记误判。
+    if (/^\s*\{\s*"toonflowCanvas"\s*:\s*true\s*[,}]/.test(header)) return true;
+    return JSON.parse((bytesRead < buffer.length ? header : await file.readFile("utf8")).trimStart())?.toonflowCanvas === true;
+  } catch (error) {
+    if (error instanceof SyntaxError) return false;
+    throw error;
+  } finally { await file.close(); }
+}
+
+const deletingCanvases = new Set<string>();
+export async function removeWorkspaceFile(directory: string, path: string, recursive = false) {
+  const info = await lstat(path);
+  if (info.isDirectory() && !recursive) return rmdir(path);
+  directory = await realpath(directory);
+  const ignored = relative(directory, path).split(sep).some(part => ["assets", ".agent"].includes(part.toLowerCase()));
+  if (ignored || !await hasCanvasFile(path)) return rm(path, { recursive });
+  const key = process.platform === "win32" ? directory.toLowerCase() : directory;
+  // ACT: 单进程内仅协调画布删除，避免锁根目录影响 Agent 会话及并行素材清理；多进程需共享此锁。
+  if (deletingCanvases.has(key)) throw Object.assign(new Error("画布正在删除，请稍后重试"), { status: 409, code: "EBUSY" });
+  deletingCanvases.add(key);
+  try {
+    if (!await hasCanvasFile(directory, path)) {
+      throw Object.assign(new Error("项目里需要保留至少一个画布。你可以先新建一个，再删除这个画布。"), { status: 409, code: "ELASTCANVAS" });
+    }
+    await rm(path, { recursive });
+  } finally { deletingCanvases.delete(key); }
 }
 
 export function isWithin(root: string, path: string) {

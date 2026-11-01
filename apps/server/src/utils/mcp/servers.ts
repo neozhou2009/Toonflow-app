@@ -6,6 +6,7 @@ import type { McpServerConfig, SavedMcpServer } from "@toonflow/mcp/client";
 import conf from "@/utils/conf";
 import { getRuntimePlatform } from "@/lib/platform";
 import { removeMcpBundle } from "@/utils/mcp/dxt";
+import { t, translateMessage } from "@/lib/i18n";
 
 export { mcpServerSchema };
 
@@ -15,10 +16,13 @@ const connections = new Map<string, { revision: string; pending: Promise<Connect
 const serverStates = new Map<string, ServerState>();
 
 export function listMcpServers() {
-  return conf.get("mcpServers", []).map(server => ({
-    ...server, status: server.enabled ? "idle" : "disabled",
-    ...(server.enabled ? serverStates.get(server.id) : {}),
-  }));
+  return conf.get("mcpServers", []).map(server => {
+    const state = server.enabled ? serverStates.get(server.id) : undefined;
+    return {
+      ...server, status: server.enabled ? "idle" : "disabled", ...state,
+      ...(state?.loadError ? { loadError: translateMessage(state.loadError) } : {}),
+    };
+  });
 }
 
 function validateServer(input: McpServerConfig) {
@@ -87,15 +91,15 @@ export function importMcpServers(source: string) {
   if (!entries.length || entries.length > 128) return invalid("一次可导入 1 至 128 个 MCP 服务");
   const fields = new Set(["id", "name", "type", "transport", "enabled", "disabled", "command", "args", "env", "cwd", "url", "headers"]);
   const servers = entries.map(([key, value], index) => {
-    const label = `第 ${index + 1} 个 MCP 配置`;
-    if (!isRecord(value)) return invalid(`${label}必须是 JSON 对象`);
-    if (Object.keys(value).some(field => !fields.has(field))) return invalid(`${label}包含不支持的字段，请保留名称、连接方式和连接参数`);
+    const label = t`第 ${index + 1} 个 MCP 配置`;
+    if (!isRecord(value)) return invalid(t`${label}必须是 JSON 对象`);
+    if (Object.keys(value).some(field => !fields.has(field))) return invalid(t`${label}包含不支持的字段，请保留名称、连接方式和连接参数`);
     const normalizeTransport = (transport: unknown) => transport === "streamable-http" ? "http" : transport;
     if (value.type !== undefined && value.transport !== undefined && normalizeTransport(value.type) !== normalizeTransport(value.transport)) {
-      return invalid(`${label}的 type 与 transport 不一致`);
+      return invalid(t`${label}的 type 与 transport 不一致`);
     }
-    if (value.disabled !== undefined && typeof value.disabled !== "boolean") return invalid(`${label}的 disabled 必须是布尔值`);
-    if (value.enabled !== undefined && value.disabled !== undefined && value.enabled === value.disabled) return invalid(`${label}的 enabled 与 disabled 冲突`);
+    if (value.disabled !== undefined && typeof value.disabled !== "boolean") return invalid(t`${label}的 disabled 必须是布尔值`);
+    if (value.enabled !== undefined && value.disabled !== undefined && value.enabled === value.disabled) return invalid(t`${label}的 enabled 与 disabled 冲突`);
     const { id: _id, type: _type, disabled, ...config } = value;
     const result = mcpServerSchema.safeParse({
       ...config,
@@ -104,8 +108,8 @@ export function importMcpServers(source: string) {
       enabled: value.enabled !== undefined ? value.enabled : disabled === undefined ? true : !disabled,
     });
     if (!result.success) {
-      const field = result.error.issues[0]?.path.join(".") || "配置";
-      return invalid(`${label}的 ${field} 格式无效，请检查必填项和字段类型`);
+      const field = result.error.issues[0]?.path.join(".") || translateMessage("配置");
+      return invalid(t`${label}的 ${field} 格式无效，请检查必填项和字段类型`);
     }
     return result.data;
   });

@@ -2,7 +2,7 @@ import { lookup } from "node:dns/promises";
 import { request, type ClientRequest, type IncomingMessage } from "node:http";
 import { request as requestSecure } from "node:https";
 import { BlockList, isIP } from "node:net";
-import { t } from "@/lib/i18n";
+import { t, translateMessage } from "@/lib/i18n";
 
 const privateAddresses = new BlockList();
 for (const [address, prefix] of [
@@ -94,9 +94,9 @@ export async function downloadPublicFile(value: string, options: { signal: Abort
     }
     if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
       response.destroy();
-      invalid(t`下载${label}失败（HTTP ${response.statusCode ?? 0}），链接可能失效或需要登录`, 502);
+      invalid(t`下载${translateMessage(label)}失败（HTTP ${response.statusCode ?? 0}），链接可能失效或需要登录`, 502);
     }
-    const tooLarge = () => invalid(t`${label}不能超过 ${maxBytes / 1024 / 1024} MB`, 413);
+    const tooLarge = () => invalid(t`${translateMessage(label)}不能超过 ${maxBytes / 1024 / 1024} MB`, 413);
     if (Number(response.headers["content-length"]) > maxBytes) { response.destroy(); tooLarge(); }
     const chunks: Buffer[] = [];
     let size = 0;

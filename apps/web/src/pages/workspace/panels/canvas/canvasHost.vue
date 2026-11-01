@@ -28,7 +28,7 @@ import useWorkspaceFiles from "@/lib/workspaceFiles";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { createCanvasMention, mentionNodeOutputs, queryMentionNodes, type MentionCanvasSource } from "@toonflow/server/agent/mentionSources";
 import type { NodeDocumentState } from "@toonflow/nodes-scaffold/nodeDocument";
-import { copyCanvasFiles, readCanvasFiles, type DocumentNode, type DocumentNodeOptions } from "./canvasFiles";
+import { copyCanvasFiles, findRemainingCanvas, readCanvasFiles, type DocumentNode, type DocumentNodeOptions } from "./canvasFiles";
 
 const props = withDefaults(defineProps<{ active?: boolean; settingsVisible?: boolean }>(), { active: true, settingsVisible: false });
 const selectedTool = defineModel<"move" | "hand">("selectedTool", { default: "move" });
@@ -278,6 +278,12 @@ async function performFileAction(directory: string, action: "copy" | "rename" | 
     if (action === "delete") {
       const stored = await readCanvasFiles(files, path);
       checkDirectory(directory);
+      if (stored.length) {
+        const replacement = await findRemainingCanvas(files, path, lifetime.signal);
+        checkDirectory(directory);
+        if (!replacement) throw new Error("项目里需要保留至少一个画布。你可以先新建一个，再删除这个画布。");
+        if (!canvases.value.some(canvas => canvas.id === replacement.id)) canvases.value = [...canvases.value, replacement];
+      }
       for (const canvas of stored) {
         deletingPanels.add(await ensureCanvas(canvas.id));
         checkDirectory(directory);
@@ -324,12 +330,6 @@ async function performFileAction(directory: string, action: "copy" | "rename" | 
         checkDirectory(directory);
         // 共享列表移除会同步取消匹配实例的保存；只删除所选路径，不连带清理画布的素材。
         canvases.value = canvases.value.filter(canvas => !affected.includes(canvas));
-        if (!entries.value.length) {
-          // ACT: 空字符串表示已删除最后一个画布，只保留菜单，不自动创建替代 JSON。
-          const entry = { key: crypto.randomUUID(), fileName: "" };
-          entries.value = [entry];
-          activeKey.value = entry.key;
-        }
         await nextTick();
       }
     });

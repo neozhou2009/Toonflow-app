@@ -7,7 +7,7 @@ import { defaultThinkingLevels, thinkingLevels, type ThinkingLevel } from "@/lib
 import { z } from "zod";
 import conf from "@/utils/conf";
 import { readReference } from "@/utils/media/generation";
-import modelContextLimits from "@/utils/ai/modelContextLimits";
+import { findModelContextLimits } from "@/utils/ai/modelContextLimits";
 import { createFileTransport, getUnsupportedFileText, type FileProvider } from "@/utils/ai/files";
 import { getRequestFiles } from "@/utils/ai/requestFiles";
 import { readFile, stat } from "@toonflow/file";
@@ -16,7 +16,6 @@ import { getReadableFileMimeType } from "@/lib/documentFormats";
 import { readDocument } from "@/utils/documents";
 
 export { fetchProviderModels } from "@/utils/ai/models";
-export { refreshProviderModels } from "@/utils/ai/initialize";
 
 export const reasoningEffortsSchema = z.union([
   z.literal(false),
@@ -38,6 +37,29 @@ export const providerSchema = z.object({
     reasoningEfforts: reasoningEffortsSchema.optional(),
   })),
 });
+
+export const accountProviderSchema = providerSchema.extend({
+  id: z.enum(["Toonflow", "toonflow"]), label: z.string().min(1), apiKey: z.literal(""),
+  token: z.string().trim().min(1).max(16384).optional(),
+  icon: z.string().optional(), version: z.string().optional(),
+});
+
+export function getAccountToken() {
+  const account = conf.get("settings", {}).toonflowAccount as { token?: unknown } | null | undefined;
+  return typeof account?.token === "string" ? account.token.trim() : "";
+}
+
+export function getAccountProvider() {
+  const accountToken = getAccountToken();
+  const parsed = accountProviderSchema.safeParse(conf.get("settings", {}).toonflowProvider);
+  return accountToken && parsed.success && parsed.data.token ? { ...parsed.data, apiKey: parsed.data.token } : undefined;
+}
+
+export function getConfiguredProviders() {
+  const providers = conf.get("settings", {}).customProviders;
+  const account = getAccountProvider();
+  return [...(account ? [account] : []), ...(Array.isArray(providers) ? providers.filter(item => typeof item?.id !== "string" || item.id.toLowerCase() !== "toonflow") : [])];
+}
 
 const builtinModels: Model<KnownApi>[] = getBuiltinProviders().flatMap(provider => getBuiltinModels(provider));
 
@@ -72,8 +94,7 @@ export function getModelReasoning(providerId: string, model: z.infer<typeof prov
 }
 
 export function getModelLimits(providerId: string, model: z.infer<typeof providerSchema>["models"][number]) {
-  const limits = modelContextLimits.find(item => item.id === model.id)
-    ?? modelContextLimits.find(item => item.id instanceof RegExp && model.id.search(item.id) !== -1);
+  const limits = findModelContextLimits(model.id);
   if (limits) return { contextWindow: limits.contextWindow, maxTokens: limits.maxTokens };
   if (model.contextWindow != null && model.maxOutputTokens != null) {
     return { contextWindow: model.contextWindow, maxTokens: model.maxOutputTokens };
@@ -91,8 +112,7 @@ export function getModelLimits(providerId: string, model: z.infer<typeof provide
 }
 
 export function getConfiguredModel(providerId: string, modelId: string) {
-  const providers = conf.get("settings", {}).customProviders;
-  const parsed = providerSchema.safeParse(Array.isArray(providers) ? providers.find(item => item?.id === providerId) : undefined);
+  const parsed = providerSchema.safeParse(getConfiguredProviders().find(item => item?.id === providerId));
   if (!parsed.success) throw Object.assign(new Error("请先在设置中配置模型供应商"), { status: 400 });
   const provider = parsed.data;
   const model = provider.models.find(item => item.id === modelId);
@@ -104,9 +124,7 @@ export function getConfiguredModel(providerId: string, modelId: string) {
 }
 
 export function listAiModels() {
-  const providers = conf.get("settings", {}).customProviders;
-  if (!Array.isArray(providers)) return [];
-  return providers.flatMap(item => {
+  return getConfiguredProviders().flatMap(item => {
     const parsed = providerSchema.extend({ id: z.string().min(1), label: z.string() }).safeParse(item);
     if (!parsed.success) return [];
     const provider = parsed.data;
@@ -204,6 +222,8 @@ export function streamAi(
   return aiApis[provider.protocol].streamSimple(model, context, {
     apiKey: provider.apiKey,
     signal,
+    // 此入口没有 AgentSession，仅重试尚未交付响应的请求，已输出的流不能直接拼接重放。
+    maxRetries: 3,
     fetch: files.fetch,
     onPayload: async (payload) => {
       let body = payload as Record<string, unknown>;

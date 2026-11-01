@@ -1,6 +1,5 @@
 import { readFile } from "@toonflow/file";
 import { spawn, type SpawnOptions } from "node:child_process";
-import { once } from "node:events";
 import { registerHooks } from "node:module";
 import { text } from "node:stream/consumers";
 import { Worker } from "node:worker_threads";
@@ -112,7 +111,13 @@ export function spawnProcess(command: string[], options: SpawnOptions & { stdin:
   const [file, ...args] = command;
   if (!file) throw new TypeError("缺少子进程可执行文件");
   const child = spawn(file, args, { ...options, stdio: ["ignore", "pipe", "ignore"] });
-  return { stdout: { text: () => text(child.stdout!) }, exited: once(child, "close").then(([code]) => code ?? -1) };
+  const exited = new Promise<number>((resolve, reject) => {
+    let failure: Error | undefined;
+    child.on("error", error => { failure ??= error; });
+    // 取消错误可能早于 close；进程关闭后调用方才能清理可执行文件。
+    child.once("close", code => { if (failure) reject(failure); else resolve(code ?? -1); });
+  });
+  return { stdout: { text: () => text(child.stdout!) }, exited };
 }
 
 type ImageInput = string | ArrayBuffer | ArrayBufferView | Blob;

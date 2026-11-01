@@ -13,27 +13,42 @@ const toolWindow = window as typeof window & {
   toonflowToolViews?: Record<string, Record<string, Component>>;
 };
 toolWindow.toonflowToolHost = { vue: vueRuntime, elementPlus: elementPlusRuntime, axios, formCreate };
-const componentLoads = new Map<string, Promise<Record<string, Component>>>();
+const componentLoads = new Map<string, { pending: Promise<Record<string, Component>>; components: Map<string, Component> }>();
 let rendererRequest: Promise<ToolRenderer[]> | undefined;
+
+export function getCachedToolComponent(toolName: string): Component | undefined {
+  // ACT: 仅同步复用组件定义；调用方仍异步复核启用状态与版本，不保留组件实例。
+  for (const load of componentLoads.values()) {
+    const component = load.components.get(toolName);
+    if (component) return component;
+  }
+}
 
 export async function loadToolComponent(toolName: string): Promise<Component | undefined> {
   // ACT: 只合并并发查询；新卡片重新查询安装状态，组件按内容版本复用。
   rendererRequest ??= axios.get<{ code: number; data: ToolRenderer[]; message?: string }>("/api/tools/renderers")
     .then(({ data }) => {
       if (data.code !== 200 || !Array.isArray(data.data)) throw new Error(data.message || "工具界面列表无效");
+      const urls = new Set(data.data.map(renderer => renderer?.url));
+      for (const url of componentLoads.keys()) {
+        if (!urls.has(url)) componentLoads.delete(url);
+      }
       return data.data;
     }).finally(() => { rendererRequest = undefined; });
   const matches = (await rendererRequest).filter(item => Array.isArray(item?.tools) && item.tools.includes(toolName));
-  if (matches.length > 1) throw new Error(`工具界面名称重复：${toolName}`);
+  if (matches.length > 1) {
+    for (const renderer of matches) componentLoads.delete(renderer.url);
+    throw new Error(`工具界面名称重复：${toolName}`);
+  }
   const renderer = matches[0];
   if (!renderer) return;
   if (!/^[a-z][a-zA-Z0-9]*$/.test(renderer.name) ||
     !new RegExp(`^/api/tools/client\\?name=${renderer.name}&version=[a-f0-9]{64}$`).test(renderer.url)) {
     throw new Error("工具界面地址无效");
   }
-  let pending = componentLoads.get(renderer.url);
-  if (!pending) {
-    pending = new Promise<Record<string, Component>>((resolve, reject) => {
+  let load = componentLoads.get(renderer.url);
+  if (!load) {
+    const pending = new Promise<Record<string, Component>>((resolve, reject) => {
       const script = document.createElement("script");
       script.src = renderer.url;
       script.onload = () => {
@@ -44,13 +59,18 @@ export async function loadToolComponent(toolName: string): Promise<Component | u
       };
       script.onerror = () => { script.remove(); reject(new Error("工具界面脚本加载失败")); };
       document.head.append(script);
-    }).catch(error => { componentLoads.delete(renderer.url); throw error; });
-    componentLoads.set(renderer.url, pending);
+    }).catch(error => {
+      if (componentLoads.get(renderer.url)?.pending === pending) componentLoads.delete(renderer.url);
+      throw error;
+    });
+    load = { pending, components: new Map() };
+    componentLoads.set(renderer.url, load);
   }
-  const components = await pending;
+  const components = await load.pending;
   const component = Object.hasOwn(components, toolName) ? components[toolName] : undefined;
   if (!component || (typeof component !== "object" && typeof component !== "function")) {
     throw new Error(`工具包未导出 ${toolName} 组件`);
   }
-  return vueRuntime.markRaw(component);
+  load.components.set(toolName, vueRuntime.markRaw(component));
+  return component;
 }

@@ -99,7 +99,13 @@ function menuButtons() {
 
 function focusButton(button?: HTMLButtonElement) {
   button?.focus({ preventScroll: true });
-  button?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  const list = menuList.value;
+  if (!button || !list) return;
+  const itemRect = button.getBoundingClientRect();
+  const listRect = list.getBoundingClientRect();
+  // 只滚动菜单列表，避免浮层聚焦时把整个画布页面卷动。
+  if (itemRect.top < listRect.top) list.scrollTop += itemRect.top - listRect.top;
+  else if (itemRect.bottom > listRect.bottom) list.scrollTop += itemRect.bottom - listRect.bottom;
 }
 
 function focusFirst(keyboard = false) {

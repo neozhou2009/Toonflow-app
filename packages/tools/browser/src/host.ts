@@ -1,4 +1,4 @@
-import { access, constants, existsSync, stat } from "@toonflow/file";
+import { access, constants, stat } from "@toonflow/file";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { ChildProcess } from "node:child_process";
@@ -44,7 +44,7 @@ function isBrowserPageUrl(value: string) {
   return isWebUrl(value) || value === "chrome-error://chromewebdata/";
 }
 
-async function findExecutable(configured: string) {
+async function findExecutables(configured: string) {
   if (configured && !isAbsolute(configured)) throw new Error("executablePath 必须是浏览器程序的绝对路径");
   // Electrobun 启动器修改环境变量后，Bun Worker 按原始大小写保存 Windows 环境变量。
   const env = process.platform === "win32"
@@ -62,12 +62,16 @@ async function findExecutable(configured: string) {
         join(root, "Chromium.app", "Contents", "MacOS", "Chromium"),
       ])
       : (process.env.PATH ?? "").split(delimiter).filter(Boolean).flatMap(root => ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "microsoft-edge-stable"].map(name => join(root, name)));
-  for (const path of candidates) {
-    if (!existsSync(path)) continue;
-    if (!(await stat(path)).isFile()) continue;
-    try { await access(path, process.platform === "win32" ? constants.F_OK : constants.X_OK); return path; }
+  const executables: string[] = [];
+  for (const path of new Set(candidates)) {
+    try {
+      if (!(await stat(path)).isFile()) continue;
+      await access(path, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+      executables.push(path);
+    }
     catch { /* 尝试下一个已安装浏览器。 */ }
   }
+  if (executables.length) return executables;
   throw new Error(configured ? "浏览器程序不存在或不可执行，请检查 executablePath" : "未找到 Chrome、Chromium 或 Edge，请先安装浏览器，或在工具配置中填写 executablePath");
 }
 
@@ -330,40 +334,51 @@ export function createBrowserRuntime() {
     return pending;
   }
 
-  async function getBrowser(executablePath: string) {
-    if (shuttingDown) throw new Error("浏览器运行时正在关闭");
-    let pending = browsers.get(executablePath);
-    if (!pending) {
-      pending = puppeteer.launch({
-        executablePath, headless: true, defaultViewport: { width: 1280, height: 800, deviceScaleFactor: 1 },
-        timeout: 15000, protocolTimeout: 20000, handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false,
-        ignoreDefaultArgs: ["--enable-automation"],
-        args: ["--no-first-run", "--no-default-browser-check", "--disable-blink-features=AutomationControlled", "--window-size=1280,800", "--screen-info={1280x800}"],
-      }).then(async browser => {
-        const child = browser.process();
-        if (child) {
-          processes.add(child);
-          child.once("exit", () => processes.delete(child));
-        }
-        browser.once("disconnected", () => {
-          browsers.delete(executablePath);
-          for (const session of sessions.values()) if (session.browser === browser) void closeSession(session).catch(() => {});
+  async function getBrowser(executables: string[], signal: AbortSignal) {
+    const failures: string[] = [];
+    // 优先复用已经启动的浏览器，避免每个新会话都重试刚刚失败的候选。
+    executables.sort((left, right) => Number(browsers.has(right)) - Number(browsers.has(left)));
+    for (const executablePath of executables) {
+      signal.throwIfAborted();
+      if (shuttingDown) throw new Error("浏览器运行时正在关闭");
+      let pending = browsers.get(executablePath);
+      if (!pending) {
+        pending = puppeteer.launch({
+          executablePath, headless: true, defaultViewport: { width: 1280, height: 800, deviceScaleFactor: 1 },
+          timeout: 15000, protocolTimeout: 20000, handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false,
+          ignoreDefaultArgs: ["--enable-automation"],
+          args: ["--no-first-run", "--no-default-browser-check", "--disable-blink-features=AutomationControlled", "--window-size=1280,800", "--screen-info={1280x800}"],
+        }).then(async browser => {
+          const child = browser.process();
+          if (child) {
+            processes.add(child);
+            child.once("exit", () => processes.delete(child));
+          }
+          browser.once("disconnected", () => {
+            browsers.delete(executablePath);
+            for (const session of sessions.values()) if (session.browser === browser) void closeSession(session).catch(() => {});
+          });
+          try { userAgents.set(browser, await readUserAgent(browser)); }
+          catch (error) { await browser.close(); throw error; }
+          return browser;
         });
-        try { userAgents.set(browser, await readUserAgent(browser)); }
-        catch (error) { await browser.close(); throw error; }
-        return browser;
-      });
-      browsers.set(executablePath, pending);
-      void pending.catch(() => { if (browsers.get(executablePath) === pending) browsers.delete(executablePath); });
+        browsers.set(executablePath, pending);
+        void pending.catch(() => { if (browsers.get(executablePath) === pending) browsers.delete(executablePath); });
+      }
+      try { return await pending; }
+      catch (error) {
+        signal.throwIfAborted();
+        failures.push(`${executablePath}\n${error instanceof Error ? error.message : String(error)}`);
+      }
     }
-    return pending;
+    throw new Error(`浏览器暂时没能启动，请更新 Chrome 或 Edge 后重试，也可以在工具设置中指定其他浏览器程序。\n\n${failures.join("\n\n")}`);
   }
 
   async function createSession(cwd: string, ownerKey: string, executablePath: string, signal: AbortSignal) {
     signal.throwIfAborted();
-    const executable = await findExecutable(executablePath);
+    const executables = await findExecutables(executablePath);
     signal.throwIfAborted();
-    const browser = await getBrowser(executable);
+    const browser = await getBrowser(executables, signal);
     signal.throwIfAborted();
     if (shuttingDown) throw new Error("浏览器运行时正在关闭");
     const context = await browser.createBrowserContext();

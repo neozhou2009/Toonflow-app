@@ -3,13 +3,15 @@ import { basename, dirname, resolve } from "node:path";
 import { readFile, readdir } from "@toonflow/file";
 import { calculateContextTokens, estimateTokens, getLastAssistantUsage, parseSessionEntries, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentSession, FileEntry, SessionEntry } from "@earendil-works/pi-coding-agent";
-import type { AgentEvent, AgentMention, AgentSubAgent, AgentToolCall } from "@/agent/runtime/types";
+import type { UserMessage } from "@earendil-works/pi-ai";
+import type { AgentEvent, AgentMention, AgentMessageDelivery, AgentPeerMessage, AgentQueue, AgentQueuedMessage, AgentSubAgent, AgentToolCall } from "@/agent/runtime/types";
 import { agentMentionsSchema } from "@/agent/runtime/mentions";
 import conf from "@/utils/conf";
-import { providerSchema, getModelLimits } from "@/utils/ai";
+import { providerSchema, getModelLimits, getConfiguredProviders } from "@/utils/ai";
 import { lockWorkspaceFiles, resolveWorkspacePath, writeWorkspaceFile } from "@/utils/workspace/files";
 import { getReadableFileMimeType } from "@/lib/documentFormats";
 import { thinkingLevels } from "@/lib/modelReasoning";
+import { translateMessage } from "@/lib/i18n";
 
 export const agentAttachmentsSchema = z
   .array(
@@ -23,24 +25,134 @@ export const agentAttachmentsSchema = z
   )
   .max(20);
 
+export const agentUserMessageSchema = z.object({
+  messageId: z.string(), content: z.string(), attachments: agentAttachmentsSchema, mentions: agentMentionsSchema.optional(),
+  queueId: z.uuid().optional(),
+  delivery: z.object({ mode: z.enum(["steer", "followUp"]), taskMessageId: z.string().min(1) }).optional(),
+});
+
+export function getAgentUserMessage(history: SessionManager, messageId: string) {
+  const entry = history.getBranch().findLast(entry => entry.type === "custom"
+    && ["toonflowAttachments", "toonflowUserMessage"].includes(entry.customType)
+    && (entry.data as { messageId?: string } | null)?.messageId === messageId);
+  const parsed = agentUserMessageSchema.safeParse(entry?.type === "custom" ? entry.data : undefined);
+  return parsed.success ? parsed.data : undefined;
+}
+
+export function getAgentTaskId(entry?: SessionEntry) {
+  if (!entry) return undefined;
+  if ((entry.type === "message" && entry.message.role === "user") || (entry.type === "custom" && entry.customType === "toonflowDeletedUser")) return entry.id;
+  if (entry.type === "custom_message" && entry.customType === "agentMessage") {
+    const details = entry.details as AgentPeerMessage | undefined;
+    if (details?.startsTurn) return details.id;
+  }
+  return undefined;
+}
+
 export type ActiveAgentSession = {
+  runId: string;
+  signal: AbortSignal;
+  queueRevision: number;
   history: SessionManager; session?: AgentSession; send: (event: AgentEvent) => void;
   entryOffset: number; tools: Map<string, AgentToolCall>;
+  waitingForAgent?: string;
+  forgetQueuedMessage?: (message: UserMessage) => void;
   abort(): Promise<void>;
 };
 type SessionMessage = {
   id: string; entryId: string; role: "user" | "assistant"; content: string; replyTo?: string; error?: string;
   streaming?: boolean;
+  queueId?: string;
   attachments?: z.infer<typeof agentAttachmentsSchema>; report?: { file: string; name: string };
+  agentMessage?: Omit<AgentPeerMessage, "id" | "content">;
   mentions?: AgentMention[];
+  delivery?: AgentMessageDelivery;
   parts: ({ id: string; type: "text" | "thinking"; content: string; collapsed?: boolean } | { id: string; type: "tool"; tool: AgentToolCall })[];
 };
 // ACT: 复用正在运行的 SDK 会话，文件锁仍由 run 持有；多进程部署时需共享会话所有权。
 const activeSessions = new Map<string, ActiveAgentSession>();
+const queuedMessageIds = new WeakMap<object, string>();
 const sessionKey = (path: string) => process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
+type ActiveAgentRun = {
+  runId: string; directory: Promise<string | undefined>;
+  abort(): void; finished: Promise<void>;
+};
+// ACT: 请求进入时即登记，停止操作也覆盖工作区授权和 SDK 初始化期间；进程退出后不恢复任务。
+const activeRuns = new Map<string, ActiveAgentRun>();
+
+export function registerAgentRun(run: ActiveAgentRun) {
+  if (activeRuns.has(run.runId)) throw Object.assign(new Error("Agent 请求标识已存在"), { status: 409 });
+  activeRuns.set(run.runId, run);
+  return () => { activeRuns.delete(run.runId); };
+}
+
+export async function stopAgentRuns(cwd: string, runIds: string[]) {
+  const directory = sessionKey(cwd);
+  await Promise.all([...new Set(runIds)].map(async runId => {
+    const run = activeRuns.get(runId);
+    if (!run) return;
+    const path = await run.directory;
+    if (!path || sessionKey(path) !== directory || activeRuns.get(runId) !== run) return;
+    run.abort();
+    await run.finished;
+  }));
+}
 
 export function getActiveAgentSession(path: string) {
   return activeSessions.get(sessionKey(path));
+}
+
+export function getQueuedMessageId(message: object) {
+  let id = queuedMessageIds.get(message);
+  if (!id) { id = crypto.randomUUID(); queuedMessageIds.set(message, id); }
+  return id;
+}
+
+export function getAgentQueue(active?: ActiveAgentSession): AgentQueue {
+  const queue = active?.session?.agent.getQueuedMessages();
+  const readMessages = (messages: NonNullable<typeof queue>["steering"] = []): AgentQueuedMessage[] => messages.flatMap(message => {
+    if (message.role !== "user") return [];
+    const content = typeof message.content === "string" ? message.content : getToolResultText(message.content);
+    return [{ id: getQueuedMessageId(message), content }];
+  });
+  return {
+    runId: active?.runId ?? "", revision: active ? ++active.queueRevision : 0,
+    steering: readMessages(queue?.steering), followUp: readMessages(queue?.followUp),
+  };
+}
+
+function getPendingAgentMessage(path: string, runId: string, messageId: string) {
+  const active = getActiveAgentSession(path);
+  if (!active?.session || active.runId !== runId || active.signal.aborted) {
+    throw Object.assign(new Error("当前回复已结束或正在停止，请刷新对话后重试"), { status: 409 });
+  }
+  const queue = active.session.agent.getQueuedMessages();
+  const message = [...queue.steering, ...queue.followUp].find(message => message.role === "user" && getQueuedMessageId(message) === messageId);
+  if (!message || message.role !== "user") {
+    throw Object.assign(new Error("这条消息已开始处理或已被取回，请刷新队列后重试"), { status: 409 });
+  }
+  return { active, session: active.session, message };
+}
+
+export function takeAgentQueuedMessage(path: string, runId: string, messageId: string) {
+  const { active, session, message } = getPendingAgentMessage(path, runId, messageId);
+  // ACT: 按真实队列对象同步取回，已被 SDK 取走但尚未显示的消息也不能再次编辑。
+  const mode = session.removeQueuedMessage(message);
+  if (!mode) {
+    throw Object.assign(new Error("这条消息已开始处理或已被取回，请刷新队列后重试"), { status: 409 });
+  }
+  active.forgetQueuedMessage?.(message);
+  const content = typeof message.content === "string" ? message.content : getToolResultText(message.content);
+  return { message: { id: messageId, content, mode }, queue: getAgentQueue(active) };
+}
+
+export function steerAgentQueuedMessage(path: string, runId: string, messageId: string) {
+  const { active, session, message } = getPendingAgentMessage(path, runId, messageId);
+  if (!session.steerQueuedMessage(message)) {
+    throw Object.assign(new Error("这条消息已开始处理或已被取回，请刷新队列后重试"), { status: 409 });
+  }
+  const content = typeof message.content === "string" ? message.content : getToolResultText(message.content);
+  return { message: { id: messageId, content, mode: "steer" as const }, queue: getAgentQueue(active) };
 }
 
 export function hasPendingAgentQuestion(active: ActiveAgentSession, visited = new Set<ActiveAgentSession>()): boolean {
@@ -48,8 +160,10 @@ export function hasPendingAgentQuestion(active: ActiveAgentSession, visited = ne
   visited.add(active);
   const tools = [...active.tools.values()];
   if (tools.some(tool => tool.status === "running" && tool.question)) return true;
-  if (!tools.some(tool => tool.name === "subAgent" && tool.status === "running")) return false;
   const path = active.history.getSessionFile()!;
+  const peer = active.waitingForAgent && getActiveAgentSession(resolve(dirname(path), active.waitingForAgent));
+  if (peer && hasPendingAgentQuestion(peer, visited)) return true;
+  if (!tools.some(tool => tool.name === "subAgent" && tool.status === "running")) return false;
   return active.history.getEntries().some(entry => {
     if (entry.type !== "custom" || entry.customType !== "toonflowSubAgent") return false;
     const file = (entry.data as AgentSubAgent | undefined)?.file;
@@ -96,7 +210,8 @@ async function updateAgentSession(cwd: string, file: string, update: (history: S
 
 export async function updateSubAgent(cwd: string, parentFile: string, agent: AgentSubAgent) {
   await updateAgentSession(cwd, parentFile, (history, active) => {
-    history.appendCustomEntry("toonflowSubAgent", agent);
+    const { runId, ...saved } = agent;
+    history.appendCustomEntry("toonflowSubAgent", saved);
     active?.send({ type: "subAgent", agent });
   });
 }
@@ -149,11 +264,11 @@ export async function deleteAgentMessage(cwd: string, path: string, options: { e
       (entry.type === "message" && entry.message.role === "user") || (entry.type === "custom" && entry.customType === "toonflowDeletedUser");
     let targets = branch.filter((entry) => options.entryIds?.includes(entry.id));
     if (options.replyTo) {
-      const index = branch.findIndex((entry) => entry.id === options.replyTo && isUserEntry(entry));
+      const index = branch.findIndex(entry => getAgentTaskId(entry) === options.replyTo);
       if (index < 0) throw Object.assign(new Error("消息不在当前对话中，请重新打开对话"), { status: 400 });
-      const nextUser = branch.findIndex((entry, position) => position > index && isUserEntry(entry));
+      const nextTask = branch.findIndex((entry, position) => position > index && Boolean(getAgentTaskId(entry)));
       targets = branch
-        .slice(index + 1, nextUser < 0 ? undefined : nextUser)
+        .slice(index + 1, nextTask < 0 ? undefined : nextTask)
         .filter((entry) => entry.type === "message" && entry.message.role === "assistant");
     }
     if (
@@ -179,7 +294,7 @@ export async function deleteAgentMessage(cwd: string, path: string, options: { e
       if ((entry.parentId && affectedIds.has(entry.parentId)) || (entry.type === "branch_summary" && affectedIds.has(entry.fromId))) {
         affectedIds.add(entry.id);
       }
-      const timingChanged = !isUserEntry(entry) && (removedIds.has(entry.id) || Boolean(entry.parentId && timedTurns.get(entry.parentId)));
+      const timingChanged = !getAgentTaskId(entry) && (removedIds.has(entry.id) || Boolean(entry.parentId && timedTurns.get(entry.parentId)));
       timedTurns.set(entry.id, timingChanged);
       if (
         (entry.type === "message" && entry.message.role === "toolResult" && toolCallIds.has(entry.message.toolCallId)) ||
@@ -196,20 +311,88 @@ export async function deleteAgentMessage(cwd: string, path: string, options: { e
     // ACT: 清除正文并保留树节点，避免分支、叶指针和实时回复的 user 锚点失效；摘要也不能带回已删内容。
     entries = [
       entries[0],
-      ...history.getEntries().map((entry) =>
-        removedIds.has(entry.id)
-          ? {
-              type: "custom" as const,
-              id: entry.id,
-              parentId: entry.parentId,
-              timestamp: new Date().toISOString(),
-              customType: isUserEntry(entry) ? "toonflowDeletedUser" : "toonflowDeletedEntry",
-            }
-          : entry
-      ),
+      ...history.getEntries().map((entry) => {
+        if (!removedIds.has(entry.id)) return entry;
+        const delivery = isUserEntry(entry) ? getAgentUserMessage(history, entry.id)?.delivery : undefined;
+        return {
+          type: "custom" as const,
+          id: entry.id,
+          parentId: entry.parentId,
+          timestamp: new Date().toISOString(),
+          customType: isUserEntry(entry) ? "toonflowDeletedUser" : "toonflowDeletedEntry",
+          ...(delivery ? { data: { delivery } } : {}),
+        };
+      }),
     ];
     await writeWorkspaceFile(path, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
     return await getAgentSession(cwd, path);
+  } finally {
+    release();
+  }
+}
+
+export async function branchAgentConversation(cwd: string, path: string, options: { entryId?: string; replyTo?: string }) {
+  if (Boolean(options.entryId) === Boolean(options.replyTo)) {
+    throw Object.assign(new Error("请选择要创建分支的消息"), { status: 400 });
+  }
+  const release = lockWorkspaceFiles([path]);
+  try {
+    const content = await readFile(path, "utf8");
+    const entries = parseSessionEntries(content);
+    if (entries[0]?.type !== "session" || entries.length !== content.split("\n").filter(line => line.trim()).length) {
+      throw Object.assign(new Error("会话文件损坏，无法创建分支"), { status: 400 });
+    }
+    const entrySchema = z.object({ type: z.string(), id: z.string().min(1), parentId: z.string().nullable(), timestamp: z.string() });
+    const knownIds = new Set<string>();
+    for (const entry of entries.slice(1)) {
+      const parsed = entrySchema.safeParse(entry);
+      if (!parsed.success || parsed.data.type === "session" || knownIds.has(parsed.data.id)
+        || (parsed.data.parentId !== null && !knownIds.has(parsed.data.parentId))) {
+        throw Object.assign(new Error("会话记录结构无效，无法创建分支"), { status: 400 });
+      }
+      knownIds.add(parsed.data.id);
+    }
+    const history = SessionManager.inMemory(cwd, undefined, entries);
+    const branch = history.getBranch();
+    const index = branch.findIndex(entry => options.replyTo ? getAgentTaskId(entry) === options.replyTo : entry.id === options.entryId);
+    const selected = branch[index];
+    if (!selected || (options.entryId && (selected.type !== "message" || !["user", "assistant"].includes(selected.message.role)))) {
+      throw Object.assign(new Error("消息不在当前对话中，请重新打开对话"), { status: 400 });
+    }
+    const nextMessage = branch.findIndex((entry, position) => position > index && (Boolean(getAgentTaskId(entry))
+      || (options.entryId && entry.type === "custom_message" && ["subAgentReport", "agentMessage"].includes(entry.customType))));
+    const end = options.entryId && selected.type === "message" && selected.message.role === "user"
+      ? index + 1 : nextMessage < 0 ? branch.length : nextMessage;
+    if (options.replyTo && !branch.slice(index + 1, end).some(entry => entry.type === "message" && entry.message.role === "assistant")) {
+      throw Object.assign(new Error("回复尚未保存，请重新打开对话后再创建分支"), { status: 400 });
+    }
+    const retained = branch.slice(0, end);
+    const userIds = new Set(retained.filter(entry => entry.type === "message" && entry.message.role === "user").map(entry => entry.id));
+    // 用户原文、附件和引用在消息之后落盘；只补齐已保留消息的元数据，不带入后续回复或摘要。
+    retained.push(...branch.slice(end).filter(entry => entry.type === "custom"
+      && ["toonflowAttachments", "toonflowUserMessage"].includes(entry.customType)
+      && userIds.has((entry.data as { messageId?: string } | undefined)?.messageId ?? "")));
+    const copied: SessionEntry[] = [];
+    const replacements = new Map<string, string>();
+    const skippedIds: string[] = [];
+    for (const entry of retained) {
+      // 分支是独立会话；历史消息保留，但不能继承原会话的子任务所有权。
+      if (entry.type === "custom" && ["toonflowSubAgentInfo", "toonflowSubAgent"].includes(entry.customType)) {
+        skippedIds.push(entry.id);
+        continue;
+      }
+      for (const id of skippedIds) replacements.set(id, entry.id);
+      skippedIds.length = 0;
+      copied.push({ ...entry, parentId: copied.at(-1)?.id ?? null,
+        ...(entry.type === "compaction" ? { firstKeptEntryId: replacements.get(entry.firstKeptEntryId) ?? entry.firstKeptEntryId } : {}) });
+    }
+    const source = await getAgentSession(cwd, path);
+    const target = SessionManager.create(cwd, dirname(path));
+    const snapshot = SessionManager.inMemory(cwd, undefined, [target.getHeader()!, ...copied]);
+    snapshot.appendSessionInfo(`${source.name.slice(0, 75)} · 分支`);
+    const targetPath = target.getSessionFile()!;
+    await writeWorkspaceFile(targetPath, [snapshot.getHeader(), ...snapshot.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n", true);
+    return await getAgentSession(cwd, targetPath);
   } finally {
     release();
   }
@@ -246,16 +429,17 @@ export async function renameAgentSession(cwd: string, path: string, name: string
 
 export async function listAgentSessions(cwd: string, directory: string) {
   const files = new Set((await readdir(directory, { withFileTypes: true })).filter((item) => item.isFile()).map((item) => item.name));
-  const sessions = await SessionManager.list(cwd, directory);
-  return sessions
+  // 克隆项目会保留原始 .agent 会话，header.cwd 仍指向源项目；以当前工作区目录中的文件为准列出历史。
+  const sessions = await SessionManager.listAll(directory);
+  return Promise.all(sessions
     .filter((item) => files.has(basename(item.path)) && !item.parentSessionPath)
     .sort((left, right) => right.modified.getTime() - left.modified.getTime())
-    .map((item) => ({
+    .map(async (item) => ({
       file: basename(item.path),
-      name: item.name || (item.messageCount ? item.firstMessage.trim().slice(0, 60) : "") || "新对话",
+      name: item.name || (await getAgentSession(cwd, item.path)).name,
       modified: item.modified,
       messageCount: item.messageCount,
-    }));
+    })));
 }
 
 export async function getAgentSession(cwd: string, path: string) {
@@ -273,12 +457,17 @@ export async function getAgentSession(cwd: string, path: string) {
     .map((entry, index) => [(entry as SessionEntry).id, index + 1]) : []);
   const history = SessionManager.inMemory(cwd, undefined, entries);
   const branch = history.getBranch();
+  const retriedMessages = new Set(branch.flatMap(entry => {
+    if (entry.type !== "custom" || entry.customType !== "toonflowRetriedMessage") return [];
+    const data = entry.data as { messageId?: unknown } | null;
+    return typeof data?.messageId === "string" ? [data.messageId] : [];
+  }));
   const reasoning = branch.findLast(entry => entry.type === "custom" && entry.customType === "toonflowReasoning");
   const reasoningSelection = z.object({ thinkingLevel: z.enum(thinkingLevels).nullable() }).safeParse(reasoning?.type === "custom" ? reasoning.data : undefined);
   const attachmentMessages = new Map(
     branch.flatMap((entry) => {
       if (entry.type !== "custom" || !["toonflowAttachments", "toonflowUserMessage"].includes(entry.customType)) return [];
-      const parsed = z.object({ messageId: z.string(), content: z.string(), attachments: agentAttachmentsSchema, mentions: agentMentionsSchema.optional() }).safeParse(entry.data);
+      const parsed = agentUserMessageSchema.safeParse(entry.data);
       return parsed.success ? [[parsed.data.messageId, parsed.data] as const] : [];
     })
   );
@@ -288,8 +477,13 @@ export async function getAgentSession(cwd: string, path: string) {
     )
   );
   let replyTo: string | undefined;
+  let delivery: AgentMessageDelivery | undefined;
   const entriesMessages = branch.flatMap<SessionMessage>((entry) => {
-    if (entry.type === "custom" && entry.customType === "toonflowDeletedUser") replyTo = entry.id;
+    if (entry.type === "custom" && entry.customType === "toonflowDeletedUser") {
+      replyTo = entry.id;
+      const parsed = agentUserMessageSchema.shape.delivery.safeParse((entry.data as { delivery?: unknown } | null)?.delivery);
+      delivery = parsed.success ? parsed.data : undefined;
+    }
     if (entry.type === "custom_message" && entry.customType === "subAgentReport") {
       const details = entry.details as { id?: string; file: string; name: string; content?: string };
       const content = details.content ?? (typeof entry.content === "string" ? entry.content : getToolResultText(entry.content));
@@ -299,10 +493,23 @@ export async function getAgentSession(cwd: string, path: string) {
         attachments: undefined, report: { file: details.file, name: details.name },
       }];
     }
+    if (entry.type === "custom_message" && entry.customType === "agentMessage") {
+      const details = entry.details as AgentPeerMessage;
+      const { id, content, ...agentMessage } = details;
+      if (details.startsTurn) { replyTo = id; delivery = undefined; }
+      return [{
+        id, entryId: entry.id, role: "assistant", content, agentMessage,
+        parts: [{ id, type: "text", content }],
+      }];
+    }
     if (entry.type !== "message" || (entry.message.role !== "user" && entry.message.role !== "assistant")) return [];
     const message = entry.message;
-    if (message.role === "user") replyTo = entry.id;
+    if (message.role === "assistant" && message.stopReason === "error" && retriedMessages.has(entry.id)) return [];
     const attachmentMessage = message.role === "user" ? attachmentMessages.get(entry.id) : undefined;
+    if (message.role === "user") {
+      replyTo = entry.id;
+      delivery = attachmentMessage?.delivery;
+    }
     const attachments = attachmentMessage?.attachments;
     const parts =
       message.role === "assistant"
@@ -320,7 +527,7 @@ export async function getAgentSession(cwd: string, path: string) {
                     id: part.id,
                     name: part.name,
                     args: part.arguments,
-                    status: result ? (result.isError ? "error" as const : "success" as const) : "interrupted" as const,
+                    status: !result || result.details?.toonflowInterrupted === true ? "interrupted" as const : result.isError ? "error" as const : "success" as const,
                     result: result ? getToolResultText(result.content) : undefined,
                   },
                 };
@@ -338,7 +545,11 @@ export async function getAgentSession(cwd: string, path: string) {
                 .filter((part) => part.type === "text")
                 .map((part) => part.text)
                 .join(""));
-    const error = message.role === "assistant" ? message.errorMessage : undefined;
+    const cancelled = message.role === "assistant" && message.stopReason === "aborted"
+      && ["The operation was aborted.", "已停止生成"].includes(message.errorMessage ?? "");
+    const error = cancelled
+      ? parts.some(part => part.type === "tool" || part.content.trim()) ? translateMessage("已停止生成") : undefined
+      : message.role === "assistant" && message.errorMessage ? translateMessage(message.errorMessage) : undefined;
     return [
       {
         id: entry.id,
@@ -350,6 +561,8 @@ export async function getAgentSession(cwd: string, path: string) {
         error,
         attachments,
         mentions: attachmentMessage?.mentions,
+        queueId: attachmentMessage?.queueId,
+        delivery,
         report: undefined,
       },
     ];
@@ -364,14 +577,14 @@ export async function getAgentSession(cwd: string, path: string) {
   }
   // ACT: 同轮的工具调用与多步回复合并后，只拼接一次正文。
   for (const message of groupedMessages) {
-    if (message.role === "assistant" && !message.report) message.content = message.parts.flatMap(part => part.type === "text" ? [part.content] : []).join("\n\n");
+    if (message.role === "assistant" && !message.report && !message.agentMessage) message.content = message.parts.flatMap(part => part.type === "text" ? [part.content] : []).join("\n\n");
   }
-  const latestUser = groupedMessages.findLast(message => message.role === "user");
-  const activeReply = active && latestUser ? groupedMessages.findLast(message =>
-    message.role === "assistant" && !message.report && message.replyTo === latestUser.id && messageIndices.has(message.entryId)
+  const activeReply = active && replyTo ? groupedMessages.findLast(message =>
+    message.role === "assistant" && !message.report && !message.agentMessage && message.replyTo === replyTo && messageIndices.has(message.entryId)
   ) : undefined;
   if (activeReply) activeReply.streaming = true;
-  const messages = groupedMessages.filter((message) => message.content || message.parts.length || message.error || message.attachments?.length || message.mentions?.length);
+  const messages = groupedMessages.filter((message) => (message.role === "assistant" ? message.content.trim() : message.content)
+    || message.parts.some(part => part.type === "tool" || part.content.trim()) || message.error || message.attachments?.length || message.mentions?.length);
   const firstUserMessage = messages.find((item) => item.role === "user");
   const context = history.buildSessionContext();
   const lastReply = history.getBranch().findLast((entry) => entry.type === "message" && entry.message.role === "assistant");
@@ -379,19 +592,19 @@ export async function getAgentSession(cwd: string, path: string) {
     lastReply?.type === "message" && lastReply.message.role === "assistant"
       ? { provider: lastReply.message.provider, modelId: lastReply.message.model }
       : context.model;
-  const providers = conf.get("settings", {}).customProviders;
-  const provider = providerSchema.safeParse(Array.isArray(providers) ? providers.find((item) => item?.id === model?.provider) : undefined);
+  const provider = providerSchema.safeParse(getConfiguredProviders().find((item) => item?.id === model?.provider));
   const configuredModel = provider.success ? provider.data.models.find((item) => item.id === model?.modelId) : undefined;
   const subAgents = new Map<string, AgentSubAgent>();
   for (const entry of history.getEntries()) {
     if (entry.type !== "custom" || entry.customType !== "toonflowSubAgent") continue;
     const agent = entry.data as AgentSubAgent;
-    const interrupted = agent.status === "running" && !active && !getActiveAgentSession(resolve(dirname(path), agent.file));
-    subAgents.set(agent.file, interrupted ? { ...agent, status: "cancelled", result: "上次运行已中断" } : agent);
+    const child = getActiveAgentSession(resolve(dirname(path), agent.file));
+    const interrupted = agent.status === "running" && !active && !child;
+    subAgents.set(agent.file, { ...(interrupted ? { ...agent, status: "cancelled" as const, result: translateMessage("上次运行已中断") } : agent), runId: child?.runId });
   }
   return {
     file: basename(path),
-    name: history.getSessionName() || (firstUserMessage?.content.trim() || firstUserMessage?.attachments?.[0]?.name)?.slice(0, 60) || "新对话",
+    name: history.getSessionName() || (firstUserMessage?.content.trim() || firstUserMessage?.attachments?.[0]?.name)?.slice(0, 60) || translateMessage("新对话"),
     messages,
     stats: getAgentStats(history),
     contextUsage: getAgentContext(history, active?.session?.model?.contextWindow ?? (configuredModel && model ? getModelLimits(model.provider, configuredModel).contextWindow : 0)),
@@ -401,6 +614,8 @@ export async function getAgentSession(cwd: string, path: string) {
     parentFile: getParentSessionFile(history),
     subAgents: [...subAgents.values()],
     running: Boolean(active),
+    runId: active?.runId,
+    queue: getAgentQueue(active),
   };
 }
 

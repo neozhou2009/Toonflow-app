@@ -42,7 +42,7 @@
         <el-link :href="selectedSource.homepage" target="_blank" rel="noopener noreferrer" :underline="false" type="primary">来源网站<icon-external-link :size="12" aria-hidden="true" /></el-link>
       </div>
       <p class="description">{{ ready ? '已检测到可用版本，无需重复安装。' : '下载后自动完成安装，无需手动解压或配置。' }}</p>
-      <el-alert v-if="status && !status.supported" :title="isMobile && !isRemoteMobile ? '移动端暂不提供 FFmpeg 下载，未配置 FFmpeg 时无法执行依赖它的音视频处理。' : '当前平台暂不提供下载，请在高级设置中使用系统安装版。'" type="warning" :closable="false" showIcon />
+      <el-alert v-if="status && !status.supported" :title="isLocalMobile ? '移动端暂不提供 FFmpeg 下载，未配置 FFmpeg 时无法执行依赖它的音视频处理。' : '当前平台暂不提供下载，请在高级设置中使用系统安装版。'" type="warning" :closable="false" showIcon />
       <el-alert v-if="config.mode === 'system'" title="当前仅使用系统安装版。如需使用下载的版本，请在高级设置中切换运行方式。" type="info" :closable="false" showIcon />
       <div v-if="download.phase !== 'idle'" class="downloadProgress" aria-live="polite">
         <div class="progressHeader">
@@ -91,10 +91,11 @@
 </template>
 
 <script setup lang="ts">
+import { translate } from "@toonflow/i18n/vue";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import axios from "axios";
 import { ElMessage } from "element-plus";
-import { isMobile, isRemoteMobile } from "@/lib/platform";
+import { isLocalMobile } from "@/lib/platform";
 import { IconDownload, IconRefresh } from "@tabler/icons-vue";
 import { saveSettings, settings } from "@/stores/settings";
 
@@ -150,7 +151,7 @@ let timer: ReturnType<typeof setTimeout> | undefined;
 let readController = new AbortController();
 
 function errorMessage(error: unknown) {
-  return axios.isAxiosError<{ message?: string }>(error) ? error.response?.data?.message || error.message : error instanceof Error ? error.message : "操作失败";
+  return axios.isAxiosError<{ message?: string }>(error) ? error.response?.data?.message || error.message : error instanceof Error ? error.message : translate("操作失败");
 }
 
 function formatBytes(bytes: number) {

@@ -10,7 +10,8 @@ const execFileAsync = promisify(execFile);
 let dialogOpen = false;
 // 选好路径到实际写入之间用一次性 token 中转，不把绝对路径回传给前端。
 const pendingSaves = new Map<string, { path: string; expiresAt: number }>();
-const tokenTtlMs = 5 * 60 * 1000;
+// ACT: 保存位置在打包和下载前选择，为最多 1 GB 的项目导出保留 30 分钟。
+const tokenTtlMs = 30 * 60 * 1000;
 
 function cleanupExpiredTokens() {
   const now = Date.now();

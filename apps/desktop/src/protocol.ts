@@ -5,19 +5,19 @@ export function parseInstallUrl(value: string): PluginInstallRequest {
   try {
     if (value.length > 8192) throw new Error(t`安装链接不能超过 8192 个字符`);
     if (/[\u0000-\u001f\u007f]/.test(value)) throw new Error(t`安装链接不能包含换行或控制字符`);
-    if (!URL.canParse(value)) throw new Error(t`安装链接不是有效 URL，应为 toonflow://install?type=node&url=编码后的下载地址`);
+    if (!URL.canParse(value)) throw new Error(t`安装链接格式不正确，应为：toonflow://install?type=node&url=编码后的下载地址。请检查或重新获取完整链接。`);
     const link = new URL(value);
     if (link.protocol !== "toonflow:" || link.hostname !== "install" || !["", "/"].includes(link.pathname)) {
-      throw new Error(t`安装链接格式错误，应为 toonflow://install?type=node&url=编码后的下载地址`);
+      throw new Error(t`安装链接格式不正确，应为：toonflow://install?type=node&url=编码后的下载地址。请检查或重新获取完整链接。`);
     }
     if (link.username || link.password || link.port || link.hash) throw new Error(t`安装链接不能包含账号、密码、端口或 # 片段`);
     if ([...link.searchParams.keys()].some(key => key !== "type" && key !== "url")) {
-      throw new Error(t`安装链接只能包含 type 和 url 参数；下载地址若带有签名或 & 参数，请先用 encodeURIComponent 编码整个下载地址，再放入 url 参数`);
+      throw new Error(t`安装链接只能包含 type 和 url 参数。如果下载地址包含签名或 & 参数，请先用 encodeURIComponent 编码整个下载地址，再放入 url 参数。`);
     }
     for (const key of ["type", "url"]) {
       const values = link.searchParams.getAll(key);
       if (!values.length) throw new Error(t`安装链接缺少 ${key} 参数`);
-      if (values.length > 1) throw new Error(t`安装链接的 ${key} 参数不能重复；请先用 encodeURIComponent 编码完整下载地址`);
+      if (values.length > 1) throw new Error(t`安装链接中的“${key}”参数重复。请检查链接，并确保完整下载地址已使用 encodeURIComponent 编码后放入 url 参数。`);
       if (!values[0]?.trim()) throw new Error(t`安装链接的 ${key} 参数不能为空`);
     }
     const type = link.searchParams.get("type") as PluginInstallType;
@@ -41,12 +41,12 @@ export function parseInstallUrl(value: string): PluginInstallRequest {
     if (address.hash) throw new Error(t`插件下载地址不能包含 # 片段，请提供文件直链`);
     let fileName: string;
     try { fileName = decodeURIComponent(address.pathname.split("/").at(-1) ?? ""); }
-    catch { throw new Error(t`下载地址中的文件名编码无效，请检查 % 转义是否完整`); }
+    catch { throw new Error(t`下载地址中的文件名编码无效，请检查 % 转义是否完整，或重新获取下载链接。`); }
     if (!fileName) throw new Error(t`下载地址缺少文件名，请提供文件直链，例如 ${examples[type]}`);
     if (fileName.length > 128) throw new Error(t`插件文件名不能超过 128 个字符`);
     if (!patterns[type].test(fileName)) throw new Error(type === "skill"
-      ? t`插件文件名或扩展名与 ${type} 类型不符；支持 ${examples[type]}`
-      : t`插件文件名或扩展名与 ${type} 类型不符；须使用小驼峰命名，例如 ${examples[type]}`);
+      ? t`插件文件名或扩展名不符合 ${type} 的要求。支持的安装文件格式：${examples[type]}。`
+      : t`插件文件名或扩展名不符合 ${type} 的要求。文件名须使用小驼峰，并使用对应的扩展名，例如：${examples[type]}。`);
     return { type, url: address.href, fileName };
   } catch (error) {
     throw Object.assign(error instanceof Error ? error : new Error(t`安装链接无效`), { status: 400 });

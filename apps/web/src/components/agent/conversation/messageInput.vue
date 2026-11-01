@@ -5,7 +5,7 @@
       <span>松开添加附件</span>
       <small>图片、视频、文档或代码文件</small>
     </div>
-    <div v-if="editingId" class="editingBanner"><span>编辑消息</span><el-button text size="small" :disabled="busy || voiceActive" @click="cancelEdit">取消</el-button></div>
+    <div v-if="editingId" class="editingBanner"><span>编辑消息</span><el-button text size="small" :disabled="running || submitting || voiceActive" @click="cancelEdit">取消</el-button></div>
     <div
       class="senderResizeHandle"
       role="separator"
@@ -38,17 +38,15 @@
     <teleport v-for="target in draftMentionTargets" :key="target.key" :to="target.element"><mentionThumbnail v-bind="mentionThumbnailProps(target.mention)" :directory="directory"><icon-photo :size="14" /></mentionThumbnail></teleport>
     <mentionContent ref="draftMentionPreview" :mentions="draftMentions" :directory="directory" removable @remove="removeDraftMention" />
     <div class="senderActions">
-      <modelPopover v-model="selectedModel" v-model:reasoningEffort="reasoningEffort" :active="active" :disabled="disabled || voiceActive" />
-      <input ref="attachmentInput" type="file" :accept="attachmentAccept" multiple hidden :disabled="locked" @change="selectAttachments" />
-      <el-button text circle :disabled="locked" aria-label="添加附件" title="添加附件" @click="attachmentInput?.click()"><icon-paperclip :size="16" /></el-button>
-      <mentionMenu ref="mentionMenuRef" :directory="directory" :active="active" :disabled="locked || !directory" :query="mentionQuery" :editor="senderElement" :currentCanvasId="createCanvasContext?.()?.id" @open="captureMentionPosition" @select="insertMentions" @dismiss="mentionQuery = undefined" />
-      <skillMenu ref="skillMenuRef" :directory="directory" :active="active" :disabled="locked || !directory" :query="skillQuery" :editor="senderElement" @select="selectSkill" @dismiss="skillQuery = undefined" />
+      <modelPopover v-model="selectedModel" v-model:reasoningEffort="reasoningEffort" :active="active" :disabled="disabled || running || submitting || voiceActive" />
+      <input ref="attachmentInput" type="file" :accept="attachmentAccept" multiple hidden :disabled="locked || running" @change="selectAttachments" />
+      <el-button text circle :disabled="locked || running" aria-label="添加附件" :title="running ? '生成期间仅支持发送文字' : '添加附件'" @click="attachmentInput?.click()"><icon-paperclip :size="16" /></el-button>
+      <mentionMenu ref="mentionMenuRef" :directory="directory" :active="active" :disabled="locked || running || !directory" :query="mentionQuery" :editor="senderElement" :currentCanvasId="createCanvasContext?.()?.id" @open="captureMentionPosition" @select="insertMentions" @dismiss="mentionQuery = undefined" />
+      <skillMenu ref="skillMenuRef" :directory="directory" :active="active" :disabled="locked || running || !directory" :query="skillQuery" :editor="senderElement" @select="selectSkill" @dismiss="skillQuery = undefined" />
       <el-button class="voiceButton" :class="{ voiceActive }" text circle :disabled="!voiceSupported || (!voiceActive && locked)" :aria-label="voiceButtonLabel" :aria-pressed="voiceActive" :title="voiceButtonLabel" @click="voiceActive ? cancelVoiceInput() : startVoiceInput()"><icon-microphone :size="18" /></el-button>
       <contextUsagePopover v-model:visible="contextMenuVisible" :usage="contextUsage" :stats="stats" :contextWindow="contextWindow" :disabled="voiceActive" />
-      <el-button class="sendButton" type="primary" circle :disabled="!busy && locked" :aria-label="busy ? '停止生成' : editingId ? '重发消息' : '发送消息'" :title="busy ? '停止生成' : editingId ? '重发消息' : '发送消息'" @click="busy ? emit('stop') : emit('submit')">
-        <icon-player-stop-filled v-if="busy" :size="14" />
-        <icon-arrow-up v-else :size="16" />
-      </el-button>
+      <el-button v-if="running" class="stopButton" text circle :disabled="stopping" aria-label="停止生成" title="停止生成" @click="emit('stop')"><icon-player-stop-filled :size="14" /></el-button>
+      <el-button class="sendButton" type="primary" circle :disabled="locked || (running && !!editingId)" :aria-label="sendLabel" :title="sendTitle" @click="submitDraft()"><icon-arrow-up :size="16" /></el-button>
     </div>
   </div>
 </template>
@@ -75,8 +73,8 @@ import useVoiceInput from "./useVoiceInput";
 import xSender, { type AnyTagProps } from "x-sender";
 import "x-sender/lib/XSender.css";
 
-const props = defineProps<{ active: boolean; disabled: boolean; busy: boolean; remoteRunning: boolean; deletingId?: string; directory?: string; contextUsage?: AgentContext; stats?: AgentStats; contextWindow: number }>();
-const emit = defineEmits<{ submit: []; stop: [] }>();
+const props = defineProps<{ active: boolean; disabled: boolean; busy: boolean; remoteRunning: boolean; stopping: boolean; submitting: boolean; deletingId?: string; directory?: string; contextUsage?: AgentContext; stats?: AgentStats; contextWindow: number }>();
+const emit = defineEmits<{ submit: [mode?: "steer" | "followUp"]; stop: [] }>();
 const selectedModel = defineModel<string>("selectedModel", { required: true });
 const reasoningEffort = defineModel<string>("reasoningEffort", { required: true });
 const editingId = defineModel<string>("editingId");
@@ -104,7 +102,11 @@ const senderHeight = ref(44);
 const senderMaxHeight = ref(Math.max(44, window.innerHeight / 2));
 let senderResize: { pointerId: number; y: number; height: number } | undefined;
 const contextMenuVisible = ref(false);
-const locked = computed(() => props.disabled || props.busy || props.deletingId !== undefined || restoringAttachment.value || voiceActive.value);
+const running = computed(() => props.busy || props.remoteRunning);
+const locked = computed(() => props.disabled || props.submitting || props.stopping || props.deletingId !== undefined || restoringAttachment.value || voiceActive.value);
+const sendLabel = computed(() => running.value ? "排队发送" : editingId.value ? "重发消息" : "发送消息");
+const sendTitle = computed(() => running.value ? "排队发送，本轮完成后处理（Enter）；Ctrl/Cmd + Enter 引导当前任务" : `${sendLabel.value}（Enter）`);
+const placeholder = computed(() => running.value ? translate("输入文字，Enter 排队，Ctrl/Cmd + Enter 引导…") : voiceSupported ? translate("输入消息，长按语音输入，@ 提及节点输出或全局素材…") : translate("输入消息，@ 提及节点输出或全局素材…"));
 const { voiceSupported, voiceState, voiceText, voiceActive, voiceButtonLabel, voiceLevel, armVoiceInput, startVoiceInput, clearVoicePress, cancelVoiceInput } = useVoiceInput({
   getSender: () => sender,
   active: () => props.active,
@@ -118,9 +120,9 @@ const { voiceSupported, voiceState, voiceText, voiceActive, voiceButtonLabel, vo
 });
 const voiceBars = computed(() => [0.35, 0.65, 0.85, 1, 0.85, 0.65, 0.35].map(weight => voiceLevel.value * weight));
 watch(voiceActive, value => { recording.value = value; }, { flush: "sync" });
-watch(locale, () => {
+watch([locale, placeholder], () => {
   if (!sender) return;
-  sender.updateConfig({ placeholder: translate(voiceSupported ? "输入消息，长按语音输入，@ 提及节点输出或全局素材…" : "输入消息，@ 提及节点输出或全局素材…") });
+  sender.updateConfig({ placeholder: placeholder.value });
   sender.chatElement.richText.setAttribute("aria-label", translate("消息"));
   for (const line of sender.chatEditor.NODES) for (const tag of line.children) {
     if (tag.type === "Mention") tag.$el.setAttribute("aria-label", t`预览 ${tag.name}`);
@@ -134,11 +136,29 @@ watch([locked, () => props.active], ([locked, active]) => {
 watch(() => props.active, active => {
   if (!active) contextMenuVisible.value = false;
 }, { flush: "sync" });
+watch(running, value => {
+  if (!value) return;
+  resetAttachmentDrag();
+  mentionQuery.value = undefined;
+  skillQuery.value = undefined;
+  mentionPosition = undefined;
+  mentionMenuRef.value?.closeMenu();
+});
+
+function submitDraft(mode: "steer" | "followUp" = "followUp") {
+  if (locked.value || !props.active || (running.value && editingId.value)) return;
+  if (running.value && (draftAttachments.value.length || sender?.getTagData().mention.length)) {
+    ElMessage.warning("生成期间仅支持发送文字，请先移除附件和提及；当前草稿已保留");
+    return;
+  }
+  if (running.value) emit("submit", mode);
+  else emit("submit");
+}
 
 function getDraftContent() {
+  // XSender 的文本模型延后一帧更新；发送时读取 DOM，避免漏掉刚输入的字符。
   return sender?.getModel().map((line, lineIndex) => line.map((tag, tagIndex) => {
     if (tag.type === "Mention") return `{{mention:${tag.id}}}`;
-    if (tag.type === "Write") return tag.text;
     return sender?.chatEditor.NODES[lineIndex]?.children[tagIndex]?.$el.textContent ?? "";
   }).join("")).join("\n").replace(/[\ufeff\u200b]/g, "") ?? "";
 }
@@ -150,7 +170,7 @@ function captureMentionPosition() {
 }
 
 function updateMentionQuery() {
-  if (!sender || insertingMentions || sender.chatEditor.isComposition || !sender.chatElement.richText.contains(sender.getSelection().anchorNode)) return;
+  if (running.value || !sender || insertingMentions || sender.chatEditor.isComposition || !sender.chatElement.richText.contains(sender.getSelection().anchorNode)) return;
   const current = sender.getCurrentNode();
   const before = current?.instance?.type === "Write" ? current.instance.text.slice(0, current.offset) : "";
   mentionQuery.value = /(?:^|[^\w@])@([^\s@]*)$/.exec(before)?.[1];
@@ -158,6 +178,7 @@ function updateMentionQuery() {
 }
 
 function handleSenderKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229 || sender?.chatEditor.isComposition) return;
   const id = event.target instanceof HTMLElement ? event.target.closest<HTMLElement>("[data-agent-mention]")?.dataset.agentMention : undefined;
   if (id && ["Enter", " "].includes(event.key)) {
     event.preventDefault();
@@ -167,11 +188,17 @@ function handleSenderKeydown(event: KeyboardEvent) {
   }
   if (mentionMenuRef.value?.handleKeydown(event)) return;
   skillMenuRef.value?.handleKeydown(event);
+  if (event.defaultPrevented) return;
+  if (running.value && event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    submitDraft("steer");
+  }
 }
 
 async function insertMentions(mentions: AgentMention[]) {
   const instance = sender;
-  if (!instance || locked.value || !props.active) return;
+  if (!instance || locked.value || running.value || !props.active) return;
   const currentIds = new Set(instance.getTagData().mention.map(item => item.id));
   if (currentIds.size + mentions.length > 20) return ElMessage.warning("每条消息最多提及 20 个输出或素材");
   insertingMentions = true;
@@ -180,7 +207,7 @@ async function insertMentions(mentions: AgentMention[]) {
     else instance.focus("last");
     if (mentionPosition?.remove) await instance.backspace(-mentionPosition.remove);
     for (const mention of mentions) {
-      if (sender !== instance || !props.active) break;
+      if (sender !== instance || locked.value || running.value || !props.active) break;
       draftMentions.value.push(mention);
       await instance.setMention({ id: mention.id, name: mentionName(mention) });
     }
@@ -199,7 +226,7 @@ async function removeDraftMention(id: string) {
 
 async function selectSkill(name: string) {
   const instance = sender;
-  if (!instance || locked.value) return;
+  if (!instance || locked.value || running.value) return;
   const model = instance.getModel();
   const first = model[0]?.[0];
   if (first?.type === "Write") first.text = `/skill:${name} ${first.text.replace(skillQuery.value !== undefined ? /^\/\S*/ : /^\s*\/skill:\S+(?:\s+|$)/, "")}`;
@@ -213,16 +240,35 @@ async function selectSkill(name: string) {
 
 async function fillPrompt(prompt: string, attachments?: AgentAttachment[]) {
   const instance = sender;
-  if (!instance || locked.value) return;
+  if (!instance || locked.value) return false;
+  if (running.value && attachments?.length) {
+    ElMessage.warning("生成期间仅支持发送文字，当前草稿已保留");
+    return false;
+  }
   draftMentions.value = [];
   if (attachments) draftAttachments.value = [...attachments];
+  await instance.reset({ clearHistory: false, chatNode: [[{ type: "Write", text: prompt }]] });
+  if (sender !== instance) return false;
+  instance.focus("last");
+  return true;
+}
+
+async function fillQueuedMessage(prompt: string) {
+  const instance = sender;
+  if (!instance) return;
+  draftMentions.value = [];
+  draftAttachments.value = [];
+  mentionQuery.value = undefined;
+  skillQuery.value = undefined;
+  mentionPosition = undefined;
+  mentionMenuRef.value?.closeMenu();
   await instance.reset({ clearHistory: false, chatNode: [[{ type: "Write", text: prompt }]] });
   if (sender === instance) instance.focus("last");
 }
 
 async function editMessage(item: AgentMessage) {
   const instance = sender;
-  if (!instance || locked.value || props.remoteRunning || item.role !== "user") return;
+  if (!instance || locked.value || running.value || item.role !== "user") return;
   if (!editingId.value) editDraft = { model: instance.getModel(), mentions: [...draftMentions.value], attachments: [...draftAttachments.value] };
   editingId.value = item.id;
   draftMentions.value = [...item.mentions ?? []];
@@ -244,7 +290,7 @@ async function restoreEditingDraft() {
 }
 
 async function cancelEdit() {
-  if (props.busy || props.deletingId !== undefined || voiceActive.value) return;
+  if (running.value || props.submitting || props.deletingId !== undefined || voiceActive.value) return;
   clearVoicePress();
   await restoreEditingDraft();
 }
@@ -293,7 +339,7 @@ async function restoreTextAttachment(index: number) {
 
 function pasteAttachments(event: ClipboardEvent) {
   const files = Array.from(event.clipboardData?.files ?? []);
-  if (!files.length) {
+  if (!files.length && !running.value) {
     try {
       const file = createPastedTextFile(event.clipboardData?.getData("text/plain") ?? "");
       if (file) files.push(file);
@@ -331,7 +377,7 @@ function dragOverAttachments(event: DragEvent) {
   if (!event.dataTransfer?.types.includes("Files")) return;
   event.preventDefault();
   event.stopPropagation();
-  draggingAttachments.value = !locked.value && props.active;
+  draggingAttachments.value = !locked.value && !running.value && props.active;
   if (draggingAttachments.value) attachmentDragDepth = Math.max(1, attachmentDragDepth);
   event.dataTransfer.dropEffect = draggingAttachments.value ? "copy" : "none";
 }
@@ -353,6 +399,7 @@ function dropAttachments(event: DragEvent) {
 
 function addAttachments(files: File[]) {
   if (locked.value) return;
+  if (running.value) return ElMessage.warning("生成期间仅支持发送文字，请在本轮完成后添加附件");
   for (const file of files) {
     const readableMimeType = getReadableFileMimeType(file.name, file.type);
     const mimeType = readableMimeType ?? file.type.split(";")[0]!.trim().toLowerCase();
@@ -365,7 +412,7 @@ function addAttachments(files: File[]) {
       continue;
     }
     if (mimeType === "text/plain" && file.size > 400000) {
-      ElMessage.warning("文本附件不能超过 400000 字节");
+      ElMessage.warning("文本附件不能超过 400 KB（400000 字节），请缩减内容后重试。");
       continue;
     }
     if (draftAttachments.value.length >= 20) {
@@ -380,14 +427,14 @@ watch(senderElement, (element, _previous, onCleanup) => {
   if (!element) return;
   const instance = new xSender(element, {
     autoFocus: props.active,
-    placeholder: translate(voiceSupported ? "输入消息，长按语音输入，@ 提及节点输出或全局素材…" : "输入消息，@ 提及节点输出或全局素材…"),
+    placeholder: placeholder.value,
     chatStyle: { minHeight: "44px", maxHeight: "50vh", fontSize: "14px", lineHeight: "24px" },
-    keyboardSendFun: event => event.key === "Enter" && !event.shiftKey && !event.isComposing,
-    keyboardWrapFun: event => event.key === "Enter" && event.shiftKey && !event.isComposing,
+    keyboardSendFun: event => event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229 && !sender?.chatEditor.isComposition,
+    keyboardWrapFun: event => event.key === "Enter" && event.shiftKey && !event.isComposing && event.keyCode !== 229 && !sender?.chatEditor.isComposition,
   });
   sender = instance;
   if (!props.active || locked.value) instance.disable();
-  instance.bus.on("agentConversation", xSender.EventSet.EVENT_COMMON_SEND, () => emit("submit"));
+  instance.bus.on("agentConversation", xSender.EventSet.EVENT_COMMON_SEND, () => submitDraft());
   instance.bus.on("agentConversation", xSender.EventSet.EVENT_COMMON_CHANGE, () => {
     skillQuery.value = /^\/([^\s/]*)$/.exec(instance.getText())?.[1];
     const targets: typeof draftMentionTargets.value = [];
@@ -470,7 +517,7 @@ async function clearDraft() {
   await sender?.reset();
 }
 
-defineExpose({ getDraft, clearDraft, fillPrompt, editMessage, cancelEdit, restoreEditingDraft });
+defineExpose({ getDraft, clearDraft, fillPrompt, fillQueuedMessage, editMessage, cancelEdit, restoreEditingDraft });
 </script>
 
 <style lang="scss">
@@ -649,7 +696,7 @@ defineExpose({ getDraft, clearDraft, fillPrompt, editMessage, cancelEdit, restor
       display: flex;
       justify-content: flex-end;
       align-items: center;
-      gap: 12px;
+      gap: 4px;
       padding: 2px 8px 6px;
 
       > .el-button {
@@ -687,11 +734,20 @@ defineExpose({ getDraft, clearDraft, fillPrompt, editMessage, cancelEdit, restor
         }
       }
 
+      .stopButton {
+        width: 28px;
+        height: 28px;
+        flex-shrink: 0;
+        padding: 0;
+        color: var(--el-text-color-regular);
+      }
+
       .sendButton {
         width: 34px;
         height: 34px;
+        flex-shrink: 0;
+        margin: 0;
         border: none;
-        transform: translateY(-2px);
       }
     }
   }

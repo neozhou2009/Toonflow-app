@@ -11,24 +11,24 @@ import "element-plus/es/components/result/style/css";
 import router from "@/router";
 import { registerDesktopProtocol } from "@/lib/desktopProtocol";
 import { registerDownloads } from "@/lib/saveFile";
-import { isMobile, isDesktop, isRemoteConnection } from "@/lib/platform";
+import { actualPlatform } from "@/lib/platform";
 import "@/lib/mobile";
 import { getMissingBrowserFeatures } from "@/lib/browserCapabilities";
 import { registerAnonymousData } from "@/lib/anonymousData";
 import { loadSettings, settingsStorage } from "@/stores/settings";
-import { checkDesktopUpdate } from "@/stores/desktopUpdate";
+import { registerDesktopAutoUpdate } from "@/stores/desktopUpdate";
 import { registerLanguage } from "@/lib/i18n";
 import { locale, translate } from "@toonflow/i18n/vue";
 
 const app = createApp(App);
 app.onUnmount(registerLanguage());
-const requiresWebView2Update = isDesktop && /Windows/i.test(navigator.userAgent)
+const requiresWebView2Update = actualPlatform.isDesktop && actualPlatform.isWindows
   && [Map.groupBy, URL.canParse, Promise.withResolvers].some(method => typeof method !== "function");
-const requiresMobileWebViewUpdate = isMobile && getMissingBrowserFeatures().length > 0;
+const requiresMobileWebViewUpdate = actualPlatform.isMobile && getMissingBrowserFeatures().length > 0;
 let isMounted = false;
 
 async function notifyDesktopReady(failed = false) {
-  if (!isDesktop) return;
+  if (!actualPlatform.isDesktop) return;
   const response = await fetch("/api/desktop/ready", {
     method: "POST",
     headers: { "x-toonflow-desktop": "1", "Content-Type": "application/json", "Accept-Language": locale.value },
@@ -50,16 +50,15 @@ async function notifyDesktopReady(failed = false) {
   app.mount("#app");
   isMounted = true;
   app.onUnmount(registerDownloads());
-  if (!isDesktop) return;
-  if (!isRemoteConnection) app.onUnmount(registerDesktopProtocol());
+  if (!actualPlatform.isDesktop) return;
+  if (actualPlatform.isLocalDesktop) app.onUnmount(registerDesktopProtocol());
   await nextTick();
   // ACT: 隐藏的 WebView 不依赖 requestAnimationFrame；等待首页挂载和页面资源就绪。
   if (document.readyState !== "complete") {
     await new Promise<void>((resolve) => window.addEventListener("load", () => resolve(), { once: true }));
   }
   await notifyDesktopReady();
-  // ACT: 桌面启动后只静默检查一次；失败留待用户手动重试，不阻塞启动或自动下载。
-  if (!isRemoteConnection) void checkDesktopUpdate(true).catch(() => {});
+  if (actualPlatform.isLocalDesktop) app.onUnmount(registerDesktopAutoUpdate());
 }).catch(async (error) => {
   console.error("页面初始化失败：", error);
   if (isMounted) app.unmount();
@@ -91,7 +90,7 @@ async function notifyDesktopReady(failed = false) {
           ? window.open("https://developer.microsoft.com/microsoft-edge/webview2/#download", "_blank")
           : window.location.reload(),
       }, () => requiresWebView2Update ? translate("前往微软官网更新") : translate("重试")),
-      isRemoteConnection ? h(ElButton, { loading: disconnecting.value, onClick: disconnectRemote }, () => "断开并独立运行") : null,
+      actualPlatform.isRemoteConnection ? h(ElButton, { loading: disconnecting.value, onClick: disconnectRemote }, () => translate("断开并独立运行")) : null,
       recoveryError.value ? h("p", { role: "alert" }, recoveryError.value) : null],
     }),
   }).mount("#app");

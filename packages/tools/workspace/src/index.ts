@@ -1,12 +1,13 @@
 import { z } from "zod";
 import type { ToolDefinition, ToolPlugin } from "@toonflow/tools-scaffold/runtime";
+import { createSearchTools } from "./search";
 
 const configSchema = z.object({ readOnly: z.boolean().default(false) }).strict();
 const downloadImageSchema = z.object({ url: z.string().trim().min(1).max(8192).describe("公开 HTTP(S) 图片直链") }).strict();
 
 const plugin: ToolPlugin = {
   validateConfig: config => configSchema.parse(config),
-  createTools({ cwd, config, files, sdk }) {
+  createTools({ cwd, config, files, resolvePath, sdk }) {
     const { readOnly } = configSchema.parse(config);
     const tools: ToolDefinition[] = [
       sdk.defineTool(sdk.createReadToolDefinition(cwd, { operations: {
@@ -22,6 +23,7 @@ const plugin: ToolPlugin = {
         stat: path => files.stat(path, true),
         readdir: path => files.readdir(path, true),
       } })),
+      ...createSearchTools({ cwd, files, resolvePath }),
     ];
     if (!readOnly) {
       tools.splice(1, 0,
@@ -55,7 +57,7 @@ const plugin: ToolPlugin = {
       ...tool,
       promptGuidelines: [
         ...(tool.promptGuidelines ?? []),
-        ...(readOnly ? ["当前文件工具只支持读取，不能用它们写入或编辑文件；其他工具的能力以各自说明为准。"] : []),
+        ...(readOnly ? ["当前文件工具只支持读取、列出和搜索，不能用它们写入或编辑文件；其他工具的能力以各自说明为准。"] : []),
       ],
     }));
   },

@@ -39,6 +39,7 @@
           <div class="headerActions">
             <el-input v-model="searchQuery" class="searchInput" :prefixIcon="IconSearch" :placeholder="folder === '.' ? '搜索全部素材' : '搜索当前文件夹'" aria-label="搜索素材" clearable @keydown.esc.stop="searchQuery = ''" />
             <el-button class="createButton" :icon="IconFolderPlus" :disabled="newFolderParent !== undefined || loading" @click="emit('startFolder')">新建文件夹</el-button>
+            <el-button class="uploadButton" type="primary" :icon="IconUpload" :loading="uploading" :disabled="newFolderParent !== undefined || loading || selecting" @click="emit('upload')">本地上传</el-button>
           </div>
         </div>
         <div class="filterRow" role="group" aria-label="素材类型">
@@ -57,12 +58,10 @@
 
       <el-scrollbar v-loading="loading" class="assetScroll" aria-label="素材列表">
         <div v-if="displayEntries.length" class="assetGrid">
-          <article v-for="entry in displayEntries" :key="entry.path" class="assetCard" :draggable="entry.type === 'file'" @dragstart="emit('drag', $event, entry)" @contextmenu.prevent.stop="emit('menu', $event, entry)">
-            <component :is="entry.type === 'directory' || mediaKind(entry) ? 'button' : 'div'" class="assetOpen" :type="entry.type === 'directory' || mediaKind(entry) ? 'button' : undefined" :disabled="entry.type === 'directory' && navigationLocked" :aria-label="entry.type === 'directory' ? '打开文件夹 ' + entry.name : mediaKind(entry) ? '预览素材 ' + entry.name : undefined" @click="openEntry(entry)">
+          <article v-for="entry in displayEntries" :key="entry.path" class="assetCard" :draggable="!canSelect && entry.type === 'file'" @dragstart="emit('drag', $event, entry)" @contextmenu.prevent.stop="emit('menu', $event, entry)">
+            <component :is="canSelect || entry.type === 'directory' || mediaKind(entry) ? 'button' : 'div'" class="assetOpen" :type="canSelect || entry.type === 'directory' || mediaKind(entry) ? 'button' : undefined" :disabled="entry.type === 'directory' ? navigationLocked : canSelect && (selecting || !canSelect(entry))" :aria-label="entry.type === 'directory' ? '打开文件夹 ' + entry.name : canSelect ? '引用素材 ' + entry.name : mediaKind(entry) ? '预览素材 ' + entry.name : undefined" @click="openEntry(entry)">
               <span class="assetVisual" :class="entry.type === 'directory' ? 'folderVisual' : mediaKind(entry) + 'Visual'">
-                <el-image v-if="mediaKind(entry) === 'image'" class="assetImage" :src="assetUrl(entry.path)" fit="cover" loading="lazy" draggable="false">
-                  <template #error><span class="imageError"><icon-photo :size="38" aria-hidden="true" /></span></template>
-                </el-image>
+                <mentionThumbnail v-if="mediaKind(entry) === 'image'" class="assetImage" :thumbnail="{ url: entry.path, mimeType: getMediaMimeType({ name: entry.path, type: '' }) }" globalAsset><span class="imageError"><icon-photo :size="38" aria-hidden="true" /></span></mentionThumbnail>
                 <icon-folder v-else-if="entry.type === 'directory'" :size="58" stroke="1.25" aria-hidden="true" />
                 <template v-else-if="mediaKind(entry) === 'video'"><mentionThumbnail class="assetVideo" :thumbnail="{ url: entry.path, mimeType: mentionAssetType(entry.path).mimeType }" globalAsset><icon-video class="mediaBackdrop" :size="76" stroke="1" aria-hidden="true" /></mentionThumbnail><span class="playButton"><icon-player-play :size="22" fill="currentColor" aria-hidden="true" /></span></template>
                 <icon-music v-else-if="mediaKind(entry) === 'audio'" :size="52" stroke="1.25" aria-hidden="true" />
@@ -88,9 +87,11 @@
 </template>
 
 <script setup lang="ts">
+import { getMediaMimeType } from "@toonflow/node-shared/mediaTypes";
 import { computed, nextTick, ref, watch } from "vue";
+import { t, translate } from "@toonflow/i18n/vue";
 import type { InputInstance } from "element-plus";
-import { IconChevronRight, IconDots, IconFile, IconFolder, IconFolderOpen, IconFolderPlus, IconLayoutGrid, IconMusic, IconPhoto, IconPlayerPlay, IconSearch, IconVideo } from "@tabler/icons-vue";
+import { IconChevronRight, IconDots, IconFile, IconFolder, IconFolderOpen, IconFolderPlus, IconLayoutGrid, IconMusic, IconPhoto, IconPlayerPlay, IconSearch, IconUpload, IconVideo } from "@tabler/icons-vue";
 import { mentionAssetType } from "@toonflow/server/agent/mentionSources";
 import mentionThumbnail from "@/components/agent/mentionThumbnail.vue";
 
@@ -101,21 +102,26 @@ type DirectoryEntry = { name: string; path: string; children: DirectoryEntry[]; 
 const props = defineProps<{
   entries: AssetEntry[];
   loading?: boolean;
+  uploading?: boolean;
   newFolderParent?: string;
   folderSaving?: boolean;
   mediaKind: (entry: AssetEntry) => MediaKind | undefined;
   assetUrl: (path: string) => string;
+  canSelect?: (entry: AssetEntry) => boolean;
+  selecting?: boolean;
 }>();
 const folder = defineModel<string>("folder", { default: "." });
 const searchQuery = defineModel<string>("searchQuery", { default: "" });
 const newFolderName = defineModel<string>("newFolderName", { default: "" });
 const emit = defineEmits<{
+  upload: [];
   startFolder: [];
   saveFolder: [];
   cancelFolder: [];
   preview: [entry: AssetEntry];
   menu: [event: MouseEvent, entry: AssetEntry];
   drag: [event: DragEvent, entry: AssetEntry];
+  select: [entry: AssetEntry];
 }>();
 
 const folderInput = ref<InputInstance>();
@@ -146,11 +152,11 @@ const directoryTree = computed(() => {
 });
 const breadcrumb = computed(() => folder.value === "." ? [] : folder.value.split("/").map((name, index, parts) => ({ name, path: parts.slice(0, index + 1).join("/") })));
 const filters = computed(() => [
-  { value: "all" as const, label: "全部", count: scopeFiles.value.length },
-  { value: "image" as const, label: "图片", count: scopeFiles.value.filter(entry => props.mediaKind(entry) === "image").length },
-  { value: "video" as const, label: "视频", count: scopeFiles.value.filter(entry => props.mediaKind(entry) === "video").length },
-  { value: "audio" as const, label: "音频", count: scopeFiles.value.filter(entry => props.mediaKind(entry) === "audio").length },
-  { value: "other" as const, label: "其他", count: scopeFiles.value.filter(entry => !props.mediaKind(entry)).length },
+  { value: "all" as const, label: translate("全部"), count: scopeFiles.value.length },
+  { value: "image" as const, label: translate("图片"), count: scopeFiles.value.filter(entry => props.mediaKind(entry) === "image").length },
+  { value: "video" as const, label: translate("视频"), count: scopeFiles.value.filter(entry => props.mediaKind(entry) === "video").length },
+  { value: "audio" as const, label: translate("音频"), count: scopeFiles.value.filter(entry => props.mediaKind(entry) === "audio").length },
+  { value: "other" as const, label: translate("其他"), count: scopeFiles.value.filter(entry => !props.mediaKind(entry)).length },
 ]);
 const displayEntries = computed(() => {
   const query = searchQuery.value.trim().toLocaleLowerCase();
@@ -173,13 +179,16 @@ function navigateTo(path: string) {
 
 function openEntry(entry: AssetEntry) {
   if (entry.type === "directory") navigateTo(entry.path);
+  else if (props.canSelect) {
+    if (!props.selecting && props.canSelect(entry)) emit("select", entry);
+  }
   else if (props.mediaKind(entry)) emit("preview", entry);
 }
 
 function typeLabel(entry: AssetEntry) {
-  if (entry.type === "directory") return "文件夹";
+  if (entry.type === "directory") return translate("文件夹");
   const kind = props.mediaKind(entry);
-  return kind === "image" ? "图片" : kind === "video" ? "视频" : kind === "audio" ? "音频" : entry.name.split(".").length > 1 ? entry.name.split(".").at(-1)?.toLocaleUpperCase() + " 文件" : "文件";
+  return kind === "image" ? translate("图片") : kind === "video" ? translate("视频") : kind === "audio" ? translate("音频") : entry.name.split(".").length > 1 ? t`${entry.name.split(".").at(-1)?.toLocaleUpperCase()} 文件` : translate("文件");
 }
 
 watch(() => props.newFolderParent, async parent => {
@@ -364,7 +373,7 @@ watch(allEntries, () => {
           gap: 12px;
 
           .searchInput { width: 230px; }
-          .createButton { margin-left: 0; }
+          .createButton, .uploadButton { margin-left: 0; }
         }
       }
 
@@ -448,6 +457,7 @@ watch(allEntries, () => {
             cursor: default;
 
             &[type="button"] { cursor: pointer; }
+            &:disabled { cursor: not-allowed; opacity: 0.4; }
 
             .assetVisual {
               position: relative;
@@ -576,7 +586,13 @@ watch(allEntries, () => {
       .directoryScroll { flex: 0 1 auto; max-height: 120px; }
     }
     .browserMain {
-      .browserHeader { padding: 14px 14px 0; }
+      .browserHeader {
+        padding: 14px 14px 0;
+        .headingRow .headerActions {
+          flex-wrap: wrap;
+          .searchInput { flex: 1 0 100%; }
+        }
+      }
       .newFolderRow { gap: 6px; margin-right: 14px; margin-left: 14px; padding: 8px; > svg { display: none; } }
       .assetScroll .assetGrid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; padding: 16px 14px; }
     }

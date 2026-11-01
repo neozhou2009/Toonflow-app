@@ -4,11 +4,13 @@ import shared from "./generated/config.json";
 export default {
   app: shared.app,
   build: {
-    // ACT: 与主桌面构建一致，保留 Photon、anydoc 原包及其相邻 WASM/原生文件。
-    bun: { entrypoint: "generated/src/index.ts", minify: true, external: ["@silvia-odwyer/photon-node", "@firecrawl/anydoc", "@firecrawl/anydoc-wasm"] },
+    // ACT: 与主桌面构建一致，保留 Photon、anydoc 与沙盒的 WASM/Worker 运行时目录。
+    bun: { entrypoint: "generated/src/index.ts", minify: true, external: ["@silvia-odwyer/photon-node", "@firecrawl/anydoc", "@firecrawl/anydoc-wasm", "just-bash"] },
     copy: {
+      "../../build/desktop/ffmpeg/ffmpegWorker.js": "bun/ffmpegWorker.js",
+      "../../build/desktop/sandbox/sandboxProcess.js": "bun/sandboxProcess.js",
+      "../../build/desktop/node_modules": "bun/node_modules",
       "../../build/desktop/photon": "bun/node_modules/@silvia-odwyer/photon-node",
-      "../../build/desktop/node_modules/@firecrawl": "bun/node_modules/@firecrawl",
       "../../build/mcp": "mcp",
       "../../build/web": "views/mainview",
       "../../build/tools": "tools",

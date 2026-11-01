@@ -2,13 +2,14 @@ import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@/lib/modelReasoning";
 import { getConfiguredModel } from "@/utils/ai";
+import { t } from "@/lib/i18n";
 
 export function getAgentModelConfiguration(providerId: string, modelId: string, thinkingLevel?: ThinkingLevel) {
   const configured = getConfiguredModel(providerId, modelId);
   // ACT: 旧版用 off 保存默认档位；模型未声明关闭能力时按默认处理，显式支持 off 的模型仍可关闭。
   if (thinkingLevel === "off" && !configured.model.reasoningLevels.includes("off")) thinkingLevel = undefined;
   if (thinkingLevel !== undefined && !configured.model.reasoningLevels.includes(thinkingLevel)) {
-    throw Object.assign(new Error(`模型 ${configured.model.label} 不支持推理等级 ${thinkingLevel}`), { status: 400, code: "UNSUPPORTED_REASONING_EFFORT" });
+    throw Object.assign(new Error(t`模型 ${configured.model.label} 不支持推理等级 ${thinkingLevel}`), { status: 400, code: "UNSUPPORTED_REASONING_EFFORT" });
   }
   return { ...configured, thinkingLevel, effectiveThinkingLevel: thinkingLevel ?? "off" };
 }

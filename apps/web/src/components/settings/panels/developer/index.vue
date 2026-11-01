@@ -6,10 +6,23 @@
           <h3>开发者工具</h3>
           <p>查看页面结构、控制台与网络请求。</p>
         </div>
-        <el-button type="primary" :icon="IconTerminal2" :loading="opening" :disabled="!isDesktop" @click="openDevTools">打开 DevTools</el-button>
+        <el-button type="primary" :icon="IconTerminal2" :loading="opening" :disabled="!actualPlatform.isDesktop" @click="openDevTools">打开 DevTools</el-button>
       </div>
-      <el-text v-if="!isDesktop" type="info">浏览器模式请从浏览器菜单打开开发者工具。</el-text>
+      <el-text v-if="!actualPlatform.isDesktop" type="info">浏览器模式请从浏览器菜单打开开发者工具。</el-text>
       <el-text v-if="requestError" type="danger" role="alert">{{ requestError }}</el-text>
+      <div class="developerRow">
+        <div class="toolDescription">
+          <h3>模拟平台</h3>
+          <p>切换会重新加载当前页面。仅模拟前端分支，原生能力与服务端权限仍以实际环境为准。</p>
+        </div>
+        <el-select class="platformSelect" :modelValue="platformSimulation" aria-label="模拟平台" @change="setPlatformSimulation">
+          <el-option label="实际平台" value="actual" />
+          <el-option label="浏览器" value="browser" />
+          <el-option label="Windows 桌面" value="windowsDesktop" />
+          <el-option label="macOS 桌面" value="macDesktop" />
+          <el-option label="移动端" value="mobile" />
+        </el-select>
+      </div>
       <div class="developerRow">
         <div class="toolDescription">
           <h3>首次使用引导</h3>
@@ -130,7 +143,7 @@ import { saveSettings, settings } from "@/stores/settings";
 import { desktopUpdateSnapshot } from "@/stores/desktopUpdate";
 import type { updateSnapshot } from "@toonflow/server/desktop";
 import saveFile from "@/lib/saveFile";
-import { isDesktop, isRemoteConnection } from "@/lib/platform";
+import { actualPlatform, isRemoteConnection, platformSimulation, setPlatformSimulation } from "@/lib/platform";
 import { installPluginFile } from "../../installPluginFile";
 import { ElMessage } from "element-plus";
 import axios from "axios";
@@ -157,7 +170,7 @@ async function openUpdateBox() {
   if (openingUpdateBox.value) return;
   openingUpdateBox.value = true;
   try {
-    if (isDesktop) {
+    if (actualPlatform.isDesktop) {
       const snapshot = desktopUpdateSnapshot.value ?? (await axios.get<{ data: updateSnapshot }>("/api/desktop/update", { timeout: 10000 })).data.data;
       if (!snapshot?.version || !snapshot.hash) throw new Error("未能读取当前版本和构建代码，请重试。");
       updateBoxBuild.value = { version: snapshot.version, hash: snapshot.hash };
@@ -219,7 +232,7 @@ const installTypes = {
   node: { get label() { return translate("节点"); }, accept: ".umd.js", example: "imageNode.umd.js", get description() { return translate("选择脚手架打包的 .umd.js 文件。"); } },
   ext: { get label() { return translate("文件扩展"); }, accept: ".umd.js", example: "ext-image.umd.js", get description() { return translate("选择扩展脚手架打包的 ext-*.umd.js 文件。"); } },
   skill: { get label() { return translate("技能"); }, accept: ".zip,.md,.tar,.tar.gz,.tgz", example: "skill.zip", get description() { return translate("支持包含技能与资源的 .zip 包、SKILL.md，以及 .tar、.tar.gz、.tgz 包。"); } },
-  tool: { get label() { return translate("工具"); }, accept: ".tool.js", example: "mediaGeneration.tool.js", get description() { return translate("选择脚手架打包的 .tool.js 文件。"); } },
+  tool: { get label() { return translate("工具"); }, accept: ".tool.js", example: "canvas.tool.js", get description() { return translate("选择脚手架打包的 .tool.js 文件。"); } },
 };
 const installType = ref<keyof typeof installTypes>("node");
 const selectedInstaller = computed(() => installTypes[installType.value]);
@@ -375,7 +388,7 @@ const opening = ref(false);
 const requestError = ref("");
 
 async function openDevTools() {
-  if (!isDesktop || opening.value) return;
+  if (!actualPlatform.isDesktop || opening.value) return;
   opening.value = true;
   requestError.value = "";
   try {
@@ -445,6 +458,8 @@ async function openDevTools() {
       justify-content: space-between;
       flex-wrap: wrap;
       gap: 16px;
+
+      .platformSelect { width: 180px; }
 
       .updateSourceEditor {
         display: flex;

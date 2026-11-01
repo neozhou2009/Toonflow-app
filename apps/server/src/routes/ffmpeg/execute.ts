@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import type { BrowserFfmpegRequest } from "@toonflow/ffmpeg";
+import type { BrowserFfmpegRequest, FfmpegRemoteEvent } from "@toonflow/ffmpeg";
 import { validateFields } from "@/lib/middleware";
 import { success } from "@/lib/responseFormat";
 import u from "@/utils";
@@ -50,8 +50,16 @@ export default Router().post("/", validateFields(inputSchema.shape), async (req,
   req.once("aborted", close);
   req.socket.once("close", close);
   let heartbeat: ReturnType<typeof setInterval> | undefined;
+  const send = (event: FfmpegRemoteEvent) => {
+    const failure = event.event === "error" ? event.args[0] as { message?: unknown; i18nMessage?: unknown } | undefined : undefined;
+    if (failure && typeof failure.message === "string") {
+      const { i18nMessage, ...details } = failure;
+      event = { ...event, args: [{ ...details, message: translateError(failure) }, ...event.args.slice(1)] };
+    }
+    if (!res.destroyed) res.write(`data: ${JSON.stringify(event)}\n\n`);
+  };
   try {
-    const factory = await u.ffmpeg.createWorkspaceFfmpeg(cwd, controller.signal);
+    const paths = await u.ffmpeg.prepareWorkspaceFfmpeg(controller.signal);
     if (input.operation.method === "prepare") {
       res.json(success());
       return;
@@ -59,14 +67,15 @@ export default Router().post("/", validateFields(inputSchema.shape), async (req,
     res.set({ "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" });
     res.flushHeaders();
     heartbeat = setInterval(() => { if (!res.destroyed) res.write(": keepalive\n\n"); }, 1000);
-    await u.ffmpeg.executeRemoteFfmpeg(factory, input, event => {
-      const failure = event.event === "error" ? event.args[0] as { message?: unknown; i18nMessage?: unknown } | undefined : undefined;
-      if (failure && typeof failure.message === "string") {
-        const { i18nMessage, ...details } = failure;
-        event = { ...event, args: [{ ...details, message: translateError(failure) }, ...event.args.slice(1)] };
-      }
-      if (!res.destroyed) res.write(`data: ${JSON.stringify(event)}\n\n`);
-    }, controller.signal);
+    await u.ffmpeg.executeWorkspaceFfmpeg(cwd, input, send, controller.signal, paths);
+    res.end();
+  } catch (error) {
+    if (!res.headersSent) throw error;
+    send({ event: "error", args: [{
+      name: error instanceof Error ? error.name : "Error",
+      message: translateError(error),
+      ...(error && typeof error === "object" && "code" in error ? { code: error.code } : {}),
+    }] });
     res.end();
   } finally {
     if (requests.get(requestKey)?.controller === controller) requests.delete(requestKey);

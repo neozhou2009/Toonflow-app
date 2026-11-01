@@ -1,4 +1,4 @@
-import { canvasSchemas, type CanvasToolCall } from "@toonflow/tool-canvas/runtime";
+import { canvasSchemas, isNodeToolAllowed, type CanvasToolCall, type NodeToolPermissions } from "@toonflow/tool-canvas/runtime";
 import type { NodeToolsContext } from "@toonflow/tools-scaffold/runtime";
 
 type CanvasNode = { id: string; type?: string; label?: unknown; position: { x: number; y: number }; selected?: boolean; data: Record<string, unknown> };
@@ -142,6 +142,7 @@ export function createCanvasQueries(source: {
   canvases(signal?: AbortSignal): Promise<{ id: string; name: string }[]>;
   nodeTypes(): { type: string; label: string }[];
   nodeTools(): NodeToolsContext;
+  nodeToolPermissions(): NodeToolPermissions;
 }) {
   const sessionId = crypto.randomUUID();
   function findNode(id: string) {
@@ -174,7 +175,8 @@ export function createCanvasQueries(source: {
       canvases: (args as { include?: string[] }).include?.includes("canvases") ? await source.canvases(signal) : [],
       types: (args as { include?: string[] }).include?.includes("nodeTypes") ? source.nodeTypes() : [],
     } : undefined;
-    const digest = await crypto.subtle.digest("SHA-256", encoder.encode(JSON.stringify([name, filters, metadata])));
+    const permissions = name === "getNodeTools" ? source.nodeToolPermissions() : undefined;
+    const digest = await crypto.subtle.digest("SHA-256", encoder.encode(JSON.stringify([name, filters, metadata, permissions])));
     signal.throwIfAborted();
     const key = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
     // ACT: getCanvas 分页只读取画布列表和节点类型；内容哈希校验这些数据，节点增删不应使游标失效。
@@ -309,6 +311,7 @@ export function createCanvasQueries(source: {
         args.nodeIds.forEach(findNode);
         let index = 0;
         for (const tool of source.nodeTools().list(args.nodeIds, args.names)) {
+          if (!isNodeToolAllowed(tool.name, permissions!)) continue;
           if (index++ < offset) continue;
           if (items.length >= args.limit || !append(tool)) return finish("nodeTools", true);
           offset++;

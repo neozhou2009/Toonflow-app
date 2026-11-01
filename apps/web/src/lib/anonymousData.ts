@@ -3,7 +3,7 @@ import { watch } from "vue";
 import router from "@/router";
 import { customProviders, privacySettings, settings } from "@/stores/settings";
 import { useWorkspaceStore } from "@/stores/workspace";
-import { isDesktop } from "./platform";
+import { actualPlatform } from "./platform";
 
 type UsageEvent = "onboarding.complete" | "onboarding.skip" | "workspace.canvas" | "workspace.document";
 type AgentOutcome = "success" | "failed" | "cancelled";
@@ -129,7 +129,7 @@ export function registerAnonymousData() {
       visibleDurationSeconds: Math.floor(visibleElapsed / 1000),
       activeDurationSeconds: Math.floor(activeElapsed / 1000),
       activitySamples,
-      app: { version: import.meta.env.appVersion, desktop: isDesktop },
+      app: { version: import.meta.env.appVersion, desktop: actualPlatform.isDesktop },
       environment: { platform: navigator.platform, browser, language: navigator.language },
       usage: {
         projectCount: workspace.projectList.length,

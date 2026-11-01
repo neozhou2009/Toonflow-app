@@ -48,7 +48,7 @@
 
 <script setup lang="ts">
 import { ref } from "vue";
-import { translate } from "@toonflow/i18n/vue";
+import { t, translate } from "@toonflow/i18n/vue";
 import { IconRestore, IconChevronDown, IconChevronUp, IconKeyboard, IconEdit, IconHandTwoFingers, IconMouse } from "@tabler/icons-vue";
 import { generalSettings, updateGeneralSettings } from "@/stores/settings";
 import { canvasShortcutFields, defaultCanvasShortcuts, getShortcutBindings, isShortcutAllowed, normalizeShortcut, type CanvasShortcutAction } from "@/lib/canvasShortcuts";
@@ -76,16 +76,16 @@ function setShortcut(action: CanvasShortcutAction, value: string) {
   const binding = normalizeShortcut(value);
   const field = canvasShortcutFields.find(field => field.id === action)!;
   if (binding === undefined || !isShortcutAllowed(field, binding)) {
-    issues.value[action] = binding === undefined ? "请输入有效按键，例如 Ctrl+KeyG / Alt+KeyG。"
-      : field.gesture === "drag" ? "拖拽操作只绑定修饰键，例如 Alt 或 Ctrl+Alt。"
-      : field.gesture === "click" ? translate("追加选择只绑定修饰键，例如 Ctrl 或 Meta。") : "此操作需要普通按键，例如 KeyP 或 Ctrl+KeyZ。";
+    issues.value[action] = binding === undefined ? translate("请输入有效按键，例如 Ctrl+KeyG / Alt+KeyG。")
+      : field.gesture === "drag" ? translate("拖拽操作只绑定修饰键，例如 Alt 或 Ctrl+Alt。")
+      : field.gesture === "click" ? translate("追加选择只绑定修饰键，例如 Ctrl 或 Meta。") : translate("此操作需要普通按键，例如 KeyP 或 Ctrl+KeyZ。");
     return;
   }
   const bindings = getShortcutBindings(binding);
   const conflict = canvasShortcutFields.find(other => other.id !== action && other.gesture === field.gesture
     && getShortcutBindings(generalSettings.value.canvasShortcuts[other.id]).some(value => bindings.includes(value)));
   if (conflict) {
-    issues.value[action] = `与「${conflict.label}」重复，请换一个快捷键。`;
+    issues.value[action] = t`与「${conflict.label}」重复，请换一个快捷键。`;
     return;
   }
   delete issues.value[action];

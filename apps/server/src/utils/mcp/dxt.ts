@@ -10,6 +10,7 @@ import { decodeText, skillPath, skillZip } from "@/utils/plugins/install";
 import { saveImportedMcpServers } from "@/utils/mcp/servers";
 import { isWithin } from "@/utils/workspace/files";
 import { getRuntimePlatform } from "@/lib/platform";
+import { t, translateMessage } from "@/lib/i18n";
 
 export const maxDxtBytes = 50 * 1024 * 1024;
 const textSchema = z.string().max(8192).refine(value => !value.includes("\0"), "内容不能包含空字符");
@@ -74,9 +75,9 @@ function systemVariables(): Variables {
 function replaceVariables(value: string, variables: Variables) {
   if (value.replace(/\$\{[^}]*\}/g, "").includes("${")) invalid("DXT 包包含不完整的变量表达式");
   return value.replace(/\$\{([^}]*)\}/g, (_token, key: string) => {
-    if (!Object.hasOwn(variables, key)) invalid(`DXT 包包含未支持的变量或未填写的配置：${key}`);
+    if (!Object.hasOwn(variables, key)) invalid(t`DXT 包包含未支持的变量或未填写的配置：${key}`);
     const replacement = variables[key]!;
-    if (Array.isArray(replacement)) invalid(`DXT 多值配置只能作为独立启动参数使用：${key}`);
+    if (Array.isArray(replacement)) invalid(t`DXT 多值配置只能作为独立启动参数使用：${key}`);
     return replacement;
   });
 }
@@ -94,19 +95,14 @@ function readDxt(fileName: string, content: string) {
   const bytes = Buffer.from(content, "base64");
   if (!bytes.length || bytes.length > maxDxtBytes) invalid("DXT 压缩包为空或超过 50 MB", 413);
   const fileModes = new Map<string, number>();
-  let files: Map<string, Uint8Array>;
-  try { files = skillZip(bytes, { maxBytes: 200 * 1024 * 1024, maxEntries: 20_000, fileModes }); }
-  catch (error) {
-    if (error instanceof Error) error.message = error.message.replaceAll("技能包", "DXT 包");
-    throw error;
-  }
+  const files = skillZip(bytes, { maxBytes: 200 * 1024 * 1024, maxEntries: 20_000, fileModes });
   const raw = files.get("manifest.json");
   if (!raw || raw.length > 1024 * 1024) invalid("DXT 包根目录必须包含不超过 1 MB 的 manifest.json");
   let source: unknown;
   try { source = JSON.parse(decodeText(raw)); }
   catch { invalid("DXT manifest.json 不是有效的 UTF-8 JSON"); }
   const parsed = manifestSchema.safeParse(source);
-  if (!parsed.success) invalid(`DXT 清单格式无效：${parsed.error.issues.map(issue => `${issue.path.join(".")} ${issue.message}`).join("；")}`);
+  if (!parsed.success) invalid(t`DXT 清单格式无效：${parsed.error.issues.map(issue => `${issue.path.join(".")} ${translateMessage(issue.message)}`).join("; ")}`);
   const manifest = parsed.data;
   const version = manifest.manifest_version ?? manifest.dxt_version;
   if (!version || !["0.1", "0.2", "0.3"].includes(version)) invalid("当前仅支持 DXT/MCPB 0.1、0.2、0.3 的静态 node、python 或 binary 服务");
@@ -115,13 +111,13 @@ function readDxt(fileName: string, content: string) {
   let entry: string;
   try { entry = skillPath(manifest.server.entry_point); }
   catch { invalid("DXT entry_point 必须是包内安全的相对文件路径"); }
-  if (!files.has(entry) && !(manifest.server.type === "binary" && process.platform === "win32" && files.has(`${entry}.exe`))) invalid(`DXT 包缺少入口文件：${entry}`);
+  if (!files.has(entry) && !(manifest.server.type === "binary" && process.platform === "win32" && files.has(`${entry}.exe`))) invalid(t`DXT 包缺少入口文件：${entry}`);
   const options = manifest.user_config ?? {};
   if (Object.keys(options).length > 128) invalid("DXT 最多支持 128 个配置项");
   const variables = systemVariables();
   const userConfig = Object.entries(options).map(([key, option]) => {
-    if (option.multiple && !["file", "directory"].includes(option.type)) invalid(`DXT 多值配置仅支持文件或目录：${key}`);
-    if (option.min !== undefined && option.max !== undefined && option.min > option.max) invalid(`DXT 配置的最小值大于最大值：${key}`);
+    if (option.multiple && !["file", "directory"].includes(option.type)) invalid(t`DXT 多值配置仅支持文件或目录：${key}`);
+    if (option.min !== undefined && option.max !== undefined && option.min > option.max) invalid(t`DXT 配置的最小值大于最大值：${key}`);
     return { key, ...option, default: defaultValue(option.default, variables) };
   });
   return { files, fileModes, manifest, userConfig };
@@ -164,16 +160,16 @@ function userVariables(options: ReturnType<typeof readDxt>["userConfig"], values
   return Object.fromEntries(options.flatMap(option => {
     const value = Object.hasOwn(values, option.key) ? values[option.key] : option.default;
     if (value === undefined) {
-      if (option.required) invalid(`请填写 DXT 配置：${option.title}`);
+      if (option.required) invalid(t`请填写 DXT 配置：${option.title}`);
       // ACT: 可选项未填写时传空值，不把清单声明的可选项变成必填项。
       return [[`user_config.${option.key}`, option.multiple ? [] : ""]];
     }
     const valid = option.multiple ? Array.isArray(value) && value.every(item => typeof item === "string")
       : option.type === "number" ? typeof value === "number" && Number.isFinite(value)
         : option.type === "boolean" ? typeof value === "boolean" : typeof value === "string";
-    if (!valid) invalid(`DXT 配置类型不正确：${option.title}`);
-    if (option.required && (typeof value === "string" && !value.trim() || Array.isArray(value) && (!value.length || value.some(item => !item.trim())))) invalid(`请填写 DXT 配置：${option.title}`);
-    if (typeof value === "number" && (option.min !== undefined && value < option.min || option.max !== undefined && value > option.max)) invalid(`DXT 配置超出允许范围：${option.title}`);
+    if (!valid) invalid(t`DXT 配置类型不正确：${option.title}`);
+    if (option.required && (typeof value === "string" && !value.trim() || Array.isArray(value) && (!value.length || value.some(item => !item.trim())))) invalid(t`请填写 DXT 配置：${option.title}`);
+    if (typeof value === "number" && (option.min !== undefined && value < option.min || option.max !== undefined && value > option.max)) invalid(t`DXT 配置超出允许范围：${option.title}`);
     return [[`user_config.${option.key}`, Array.isArray(value) ? value : String(value)]];
   }));
 }

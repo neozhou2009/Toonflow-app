@@ -1,7 +1,7 @@
 <template>
   <div v-if="documentTarget" class="nodeDocumentPlaceholder" :style="canvasSize" aria-hidden="true" />
   <teleport :to="documentTarget ?? 'body'" :disabled="!documentTarget">
-  <div ref="skeletonElement" v-bind="$attrs" class="nodeSkeleton" :class="{ documentNode: documentTarget }" @wheel.capture="zoomCanvas" @dblclick.stop="focusNode" @contextmenu="documentTarget && openMenu($event)">
+  <div ref="skeletonElement" v-bind="$attrs" class="nodeSkeleton" :class="{ documentNode: documentTarget, resized: !!resizedStyle.height, resizing: !!resize }" :style="resizedStyle" @wheel.capture="zoomCanvas" @dblclick.stop="focusNode" @contextmenu="documentTarget && openMenu($event)">
     <el-dropdown
       v-if="!readOnly"
       ref="menu"
@@ -156,6 +156,20 @@
           <component :is="isHandleConnected(item) ? IconCircleDot : IconCircleDashed" class="handleIcon" :size="18" aria-hidden="true" />
         </handle>
       </template>
+      <button
+        v-if="!readOnly && !loading && !documentTarget"
+        class="resizeCorner nodrag nopan"
+        type="button"
+        aria-label="调整节点大小（方向键微调）"
+        @pointerdown.stop.prevent="startResize"
+        @pointermove.stop="moveResize"
+        @pointerup.stop="finishResize"
+        @pointercancel="finishResize"
+        @lostpointercapture="finishResize"
+        @keydown.stop="resizeWithKeyboard"
+        @mousedown.stop
+        @click.stop
+        @dblclick.stop />
     </div>
   </div>
   </teleport>
@@ -284,6 +298,7 @@ const {
   removeNodes,
   removeEdges,
   updateNodeInternals,
+  screenToFlowCoordinate,
   connectionLookup,
   connectionStartHandle,
   connectionEndHandle,
@@ -298,6 +313,78 @@ const {
   onNodeClick,
   onSelectionStart,
 } = useVueFlow();
+const batchHistory = inject<((action: () => Promise<void>) => Promise<void>) | undefined>("batchCanvasHistory", undefined);
+const resizedStyle = computed(() => {
+  const style = typeof node.style === "function" ? node.style(node) : node.style;
+  return props.readOnly || documentTarget.value ? {} : {
+    ...(style?.width ? { width: style.width } : {}),
+    ...(style?.height ? { height: style.height } : {}),
+  };
+});
+const resize = shallowRef<{
+  element: HTMLElement;
+  pointerId: number;
+  point: { x: number; y: number };
+  width: number;
+  height: number;
+  resolve: () => void;
+}>();
+
+function startResize(event: PointerEvent) {
+  if (props.readOnly || props.loading || documentTarget.value || event.button !== 0 || resize.value) return;
+  const element = event.currentTarget as HTMLElement;
+  const skeleton = skeletonElement.value;
+  if (!skeleton) return;
+  const action = () => new Promise<void>(resolve => {
+    resize.value = {
+      element, pointerId: event.pointerId,
+      point: screenToFlowCoordinate({ x: event.clientX, y: event.clientY }),
+      width: skeleton.offsetWidth, height: skeleton.offsetHeight, resolve,
+    };
+    node.resizing = true;
+    element.setPointerCapture(event.pointerId);
+  });
+  void (batchHistory ? batchHistory(action) : action()).catch(error => {
+    finishResize();
+    ElMessage.error(error instanceof Error ? error.message : "节点缩放失败");
+  });
+}
+
+function setNodeSize(width: number, height: number) {
+  const titleHeight = skeletonElement.value?.querySelector<HTMLElement>(".titleBar")?.offsetHeight ?? 32;
+  const style = typeof node.style === "function" ? node.style(node) : node.style;
+  node.style = { ...style, width: `${Math.max(160, width)}px`, height: `${Math.max(cardHeight.value + titleHeight, height)}px` };
+}
+
+function moveResize(event: PointerEvent) {
+  const state = resize.value;
+  if (!state || event.pointerId !== state.pointerId) return;
+  if (props.readOnly || props.loading || documentTarget.value || findNode(nodeId) !== node) return finishResize();
+  const point = screenToFlowCoordinate({ x: event.clientX, y: event.clientY });
+  setNodeSize(state.width + point.x - state.point.x, state.height + point.y - state.point.y);
+}
+
+function finishResize(event?: PointerEvent) {
+  const state = resize.value;
+  if (!state || (event && event.pointerId !== state.pointerId)) return;
+  resize.value = undefined;
+  node.resizing = false;
+  if (state.element.hasPointerCapture(state.pointerId)) state.element.releasePointerCapture(state.pointerId);
+  state.resolve();
+}
+
+function resizeWithKeyboard(event: KeyboardEvent) {
+  if (props.readOnly || props.loading || documentTarget.value || resize.value) return;
+  const skeleton = skeletonElement.value;
+  if (!skeleton || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+  event.preventDefault();
+  const dx = event.key === "ArrowLeft" ? -10 : event.key === "ArrowRight" ? 10 : 0;
+  const dy = event.key === "ArrowUp" ? -10 : event.key === "ArrowDown" ? 10 : 0;
+  setNodeSize(skeleton.offsetWidth + dx, skeleton.offsetHeight + dy);
+}
+
+onScopeDispose(() => finishResize());
+watch(() => [props.readOnly, props.loading, documentTarget.value], () => finishResize());
 const localStartHandle = computed(() => (connectionStartHandle.value?.nodeId === nodeId ? connectionStartHandle.value : undefined));
 const localEndHandle = computed(() => (connectionEndHandle.value?.nodeId === nodeId ? connectionEndHandle.value : undefined));
 const localSelectionConnection = computed(() => (selectionConnection?.value?.nodeId === nodeId ? selectionConnection.value : undefined));
@@ -315,9 +402,7 @@ async function focusNode(event: MouseEvent) {
   const flowElement = vueFlowRef.value;
   if (!flowElement || !element.isConnected) return;
   const flowRect = flowElement.getBoundingClientRect();
-  const agentWidth = Math.max(0, parseFloat(getComputedStyle(flowElement).getPropertyValue("--agentWidth")) || 0);
-  const availableWidth = flowRect.width - agentWidth;
-  if (availableWidth <= 0 || flowRect.height <= 0) return;
+  if (flowRect.width <= 0 || flowRect.height <= 0) return;
   const rects = [element, ...element.querySelectorAll<HTMLElement>(":scope > .floatingSlot")]
     .filter((item) => item.getClientRects().length)
     .map((item) => item.getBoundingClientRect());
@@ -330,7 +415,7 @@ async function focusNode(event: MouseEvent) {
       width: (Math.max(...rects.map((rect) => rect.right)) - left) / viewport.value.zoom,
       height: (Math.max(...rects.map((rect) => rect.bottom)) - top) / viewport.value.zoom,
     },
-    availableWidth, flowRect.height, minZoom.value, maxZoom.value, 0.2
+    flowRect.width, flowRect.height, minZoom.value, maxZoom.value, 0.2
   );
   await setViewport(targetViewport, { duration: 300 });
 }
@@ -583,6 +668,28 @@ watch(
   color: var(--el-text-color-primary);
   text-align: left;
 
+  &.resized {
+    display: flex;
+    flex-direction: column;
+
+    .titleBar { flex-shrink: 0; }
+    .cardContainer {
+      flex: 1;
+      min-height: 0;
+
+      .contentCard {
+        height: 100%;
+        box-sizing: border-box;
+
+        :deep(.el-card__body) {
+          height: 100%;
+          box-sizing: border-box;
+          overflow: auto;
+        }
+      }
+    }
+  }
+
   &.documentNode {
     display: flex;
     flex-direction: column;
@@ -611,6 +718,11 @@ watch(
 
   &:hover .titleBar .nodeActions {
     visibility: visible;
+  }
+
+  &:hover,
+  &.resizing {
+    .cardContainer .resizeCorner { opacity: 0.55; }
   }
 
   .floatingSlot {
@@ -695,6 +807,32 @@ watch(
 
   .cardContainer {
     position: relative;
+
+    .resizeCorner {
+      position: absolute;
+      /* 拖柄内侧角轻贴圆角边框，主体留在边框外。 */
+      right: calc(var(--ui-radius-large, var(--el-border-radius-base)) * 0.293 - 2px);
+      bottom: calc(var(--ui-radius-large, var(--el-border-radius-base)) * 0.293 - 2px);
+      transform: translate(50%, 50%);
+      box-sizing: border-box;
+      width: 4px;
+      height: 4px;
+      padding: 0;
+      border: 1px solid var(--el-border-color);
+      border-radius: 1px;
+      background: var(--el-bg-color);
+      opacity: 0;
+      cursor: nwse-resize;
+      touch-action: none;
+
+      &::before {
+        content: "";
+        position: absolute;
+        inset: -4px;
+      }
+
+      &:focus-visible { opacity: 1; }
+    }
 
     .contentCard.selected {
       border-color: color-mix(in srgb, var(--el-color-primary) 50%, var(--el-border-color-light));

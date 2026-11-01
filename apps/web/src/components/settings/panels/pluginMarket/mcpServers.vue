@@ -177,6 +177,7 @@
 
 <script setup lang="ts">
 import axios from "axios";
+import { t, translate } from "@toonflow/i18n/vue";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { IconPlus, IconFileCode, IconPackage, IconCircleCheck, IconAlertCircle, IconLoader2 } from "@tabler/icons-vue";
@@ -226,14 +227,14 @@ const form = ref({
 });
 const settingsSummary = computed(() => {
   const local = form.value.transport === "stdio";
-  const parts = local && form.value.cwd.trim() ? ["已配置工作目录"] : [];
+  const parts = local && form.value.cwd.trim() ? [translate("已配置工作目录")] : [];
   const value = local ? form.value.env : form.value.headers;
-  const label = local ? "环境变量" : "请求头";
+  const label = local ? translate("环境变量") : translate("请求头");
   if (value.trim()) {
     try {
       const config = JSON.parse(value);
-      parts.push(config && typeof config === "object" && !Array.isArray(config) ? `${label} ${Object.keys(config).length} 项` : `${label}已填写`);
-    } catch { parts.push(`${label}已填写`); }
+      parts.push(config && typeof config === "object" && !Array.isArray(config) ? t`${label} ${Object.keys(config).length} 项` : t`${label}已填写`);
+    } catch { parts.push(t`${label}已填写`); }
   }
   return parts.join(" · ");
 });
@@ -286,7 +287,7 @@ watch(
 );
 
 function errorMessage(cause: unknown) {
-  return axios.isAxiosError(cause) ? cause.response?.data?.message || cause.message : cause instanceof Error ? cause.message : "操作失败";
+  return axios.isAxiosError(cause) ? cause.response?.data?.message || cause.message : cause instanceof Error ? cause.message : translate("操作失败");
 }
 
 function openEditor(server?: McpServerConfig) {
@@ -333,12 +334,12 @@ function serverFromForm(): McpServerConfig {
     if (!command) throw new Error("请填写启动命令");
     return {
       ...server, command, args: value.args === originalArgs.join("\n") ? [...originalArgs] : value.args ? value.args.split(/\r?\n/) : [],
-      ...(value.cwd.trim() ? { cwd: value.cwd.trim() } : {}), env: parseRecord(value.env, "环境变量"),
+      ...(value.cwd.trim() ? { cwd: value.cwd.trim() } : {}), env: parseRecord(value.env, translate("环境变量")),
     };
   }
   const url = value.url.trim();
   if (!URL.canParse(url) || !["http:", "https:"].includes(new URL(url).protocol)) throw new Error("请输入有效的 HTTP 或 HTTPS 服务地址");
-  return { ...server, url, headers: parseRecord(value.headers, "请求头") };
+  return { ...server, url, headers: parseRecord(value.headers, translate("请求头")) };
 }
 
 async function saveServer() {

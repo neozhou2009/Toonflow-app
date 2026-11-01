@@ -1,10 +1,13 @@
 import { t } from "@/lib/i18n";
 import { listMediaModels, generateMedia } from "@/utils/media/generation";
-import { createWorkspaceFfmpeg } from "@/utils/ffmpeg";
+import { createWorkspaceFfmpeg, executeWorkspaceFfmpeg } from "@/utils/ffmpeg";
 import { createBrowserContext } from "@/utils/browser";
+import { createSandboxContext } from "@toonflow/tool-sandbox/host";
+import { canvasSchemas, isNodeToolAllowed, nodeToolPermissionsSchema } from "@toonflow/tool-canvas/runtime";
+import { getRuntimePlatform } from "@/lib/platform";
 import { importImage } from "@/utils/workspace/chatImages";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import { access, constants, copyFile, lstat, mkdir, readFile, readdir, rm, rmdir, stat, withFileAccess } from "@toonflow/file";
+import { access, constants, copyFile, createReadStream, mkdir, readFile, readdir, stat, withFileAccess } from "@toonflow/file";
 import {
   defineTool, createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition, createLsToolDefinition,
   detectSupportedImageMimeTypeFromFile, type ToolDefinition,
@@ -12,7 +15,7 @@ import {
 import type { CanvasContext, QuestionContext, ToolContext, ToolFiles } from "@toonflow/tools-scaffold/runtime";
 import { asrRequestSchema } from "@toonflow/tools-scaffold/runtime";
 import conf from "@/utils/conf";
-import { isWithin, resolveWorkspacePath, writeWorkspaceFile, renameWorkspaceFile, lockWorkspaceFiles, protectWorkspaceRoot } from "@/utils/workspace/files";
+import { isWithin, resolveWorkspacePath, writeWorkspaceFile, renameWorkspaceFile, removeWorkspaceFile, lockWorkspaceFiles, protectWorkspaceRoot } from "@/utils/workspace/files";
 import { listTools, loadTool, validateToolConfig } from "@/utils/plugins/tools";
 import { createSkillContext } from "@/agent/skills";
 import { createAssetContext } from "@/agent/assets";
@@ -20,6 +23,24 @@ import { readDocument } from "@/utils/documents";
 import { createMcpAgentTools } from "@/utils/mcp/servers";
 
 export function createAgentToolContext(cwd: string, config: Record<string, unknown> = {}, canvas?: CanvasContext, question?: QuestionContext, workspaceAvailable = true): ToolContext {
+  const sourceCanvas = canvas;
+  if (sourceCanvas) {
+    canvas = {
+      get id() { return sourceCanvas.id; },
+      get tools() { return sourceCanvas.tools; },
+      getNodeLabel: sourceCanvas.getNodeLabel?.bind(sourceCanvas),
+      call(request, signal) {
+        if (request.name === "nodeTools") {
+          const { name } = canvasSchemas.nodeTools.parse(request.args);
+          const permissions = nodeToolPermissionsSchema.parse(conf.get("settings", {}).agentNodeTools ?? {});
+          if (!isNodeToolAllowed(name, permissions)) {
+            throw new Error(t`Agent 已禁用节点函数 ${name}，请在顶部节点工具控制中开启后再调用`);
+          }
+        }
+        return sourceCanvas.call(request, signal);
+      },
+    };
+  }
   const skillsDirectory = join(dirname(conf.path), "skills");
   const requireWorkspace = () => { if (!workspaceAvailable) throw new Error("此对话未提供工作目录，无法使用文件或媒体操作"); };
   const resolvePath = async (path: string, readOnly = false) => {
@@ -36,10 +57,25 @@ export function createAgentToolContext(cwd: string, config: Record<string, unkno
   };
   const files: ToolFiles = {
     importImage: url => { requireWorkspace(); return importImage(cwd, url); },
-    readFile: async (path, readOnly = false) => readFile(await resolvePath(path, readOnly)),
+    readFile: async (path, readOnly = false, options) => {
+      options?.signal?.throwIfAborted();
+      const target = await resolvePath(path, readOnly);
+      if (options?.maxBytes === undefined) return readFile(target, { signal: options?.signal });
+      if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0) throw new Error("文件读取上限无效");
+      const chunks: Buffer[] = [];
+      let size = 0;
+      // ACT: 多读一字节判断超限，避免 stat 后文件增长导致整个大文件进入内存。
+      for await (const chunk of createReadStream(target, { end: options.maxBytes, signal: options.signal })) {
+        const content = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        size += content.byteLength;
+        if (size > options.maxBytes) throw Object.assign(new Error("文件超过读取大小上限"), { code: "EFBIG" });
+        chunks.push(content);
+      }
+      return Buffer.concat(chunks, size);
+    },
     access: async (path, readOnly = false) => access(await resolvePath(path, readOnly)),
     stat: async (path, readOnly = false) => stat(await resolvePath(path, readOnly)),
-    readdir: async (path, readOnly = false) => readdir(await resolvePath(path, readOnly)),
+    readdir: async (path, readOnly = false, signal) => readdir(await resolvePath(path, readOnly), { signal }),
     detectImageMimeType: async (path, readOnly = false) => {
       const target = await resolvePath(path, readOnly);
       return withFileAccess([target], "read", () => detectSupportedImageMimeTypeFromFile(target));
@@ -65,8 +101,7 @@ export function createAgentToolContext(cwd: string, config: Record<string, unkno
     }),
     remove: (path, recursive = false) => withWritePaths([path], async ([target]) => {
       protectWorkspaceRoot(cwd, target);
-      if ((await lstat(target)).isDirectory() && !recursive) await rmdir(target);
-      else await rm(target, { recursive });
+      await removeWorkspaceFile(cwd, target, recursive);
     }),
     copyFile: (path, target, exclusive = false) => withWritePaths([path, target], async ([source, destination]) => {
       await copyFile(source, destination, exclusive ? constants.COPYFILE_EXCL : 0);
@@ -76,6 +111,8 @@ export function createAgentToolContext(cwd: string, config: Record<string, unkno
     cwd, config, files, resolvePath, writeFile: files.writeFile, canvas, question,
     skills: workspaceAvailable ? createSkillContext(cwd) : undefined, assets: workspaceAvailable ? createAssetContext(cwd) : undefined,
     browser: createBrowserContext(cwd),
+    // ACT: OHOS 使用禁用 WASM 的嵌入式 Node，无法启动当前沙盒子进程。
+    sandbox: workspaceAvailable && getRuntimePlatform().os !== "ohos" ? createSandboxContext({ files, resolvePath }) : undefined,
     asr: {
       async transcribe(path, options = {}) {
         requireWorkspace();
@@ -90,6 +127,7 @@ export function createAgentToolContext(cwd: string, config: Record<string, unkno
       },
     },
     ffmpeg: signal => { requireWorkspace(); return createWorkspaceFfmpeg(cwd, signal); },
+    executeFfmpeg: (request, emit, signal) => { requireWorkspace(); return executeWorkspaceFfmpeg(cwd, request, emit, signal); },
     media: workspaceAvailable ? {
       listModels: listMediaModels,
       generateImage: (request, signal) => generateMedia(cwd, "image", request, signal),

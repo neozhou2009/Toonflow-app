@@ -69,6 +69,7 @@
 </template>
 
 <script setup lang="ts">
+import { translate } from "@toonflow/i18n/vue";
 import { computed, onMounted, ref, watch } from "vue";
 import axios from "axios";
 import { ElMessage, type InputInstance } from "element-plus";
@@ -114,7 +115,7 @@ const copyHasCredential = ref(false);
 const copyInput = ref<InputInstance>();
 
 function errorMessage(error: unknown) {
-  return axios.isAxiosError<{ message?: string }>(error) ? error.response?.data?.message || error.message : error instanceof Error ? error.message : "操作失败";
+  return axios.isAxiosError<{ message?: string }>(error) ? error.response?.data?.message || error.message : error instanceof Error ? error.message : translate("操作失败");
 }
 
 async function refreshStatus() {
@@ -178,7 +179,7 @@ async function copyConfig(transport: "http" | "stdio") {
     headers: { Authorization: `Bearer ${mcpSettings.value.token}` },
   };
   if (!config) return;
-  await copyText(JSON.stringify({ mcpServers: { toonflow: config } }, null, 2), "MCP 配置", transport === "http");
+  await copyText(JSON.stringify({ mcpServers: { toonflow: config } }, null, 2), translate("MCP 配置"), transport === "http");
 }
 
 async function copyText(content: string, title: string, hasCredential = false) {

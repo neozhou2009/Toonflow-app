@@ -151,10 +151,10 @@ if (existsSync(payload)) {
 }
 await mkdir(payload, { recursive: true });
 const result = await Bun.build({
-  entrypoints: [join(projectRoot, "apps/mobile/src/server.ts"), join(projectRoot, "packages/mcp/src/stdio.ts")],
+  entrypoints: [join(projectRoot, "apps/mobile/src/server.ts"), join(projectRoot, "packages/mcp/src/stdio.ts"), join(projectRoot, "packages/ffmpeg/src/ffmpegWorker.ts")],
   target: "node", format: "esm", splitting: true, outdir: payload, naming: "[name].js", minify: true,
   plugins: [nodeBuildPlugin],
-  external: ["@silvia-odwyer/photon-node", "@firecrawl/anydoc", "@firecrawl/anydoc-wasm"], define: { "process.env.appVersion": JSON.stringify(version) },
+  external: ["@silvia-odwyer/photon-node", "@firecrawl/anydoc", "@firecrawl/anydoc-wasm", "just-bash"], define: { "process.env.appVersion": JSON.stringify(version) },
 });
 if (!result.success) throw new AggregateError(result.logs, "构建 OHOS 移动端服务失败");
 const aiDirectory = dirname(Bun.resolveSync("@earendil-works/pi-ai", join(projectRoot, "apps/server")));

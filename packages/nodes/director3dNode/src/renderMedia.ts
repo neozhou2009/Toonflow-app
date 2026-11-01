@@ -22,7 +22,7 @@ export async function renderImage(scene: SceneDocument, anchor: CameraAnchor, as
 export async function renderVideo(scene: SceneDocument, plan: DirectorPlan, aspect: number, signal: AbortSignal, onProgress: (value: number) => void, lighting?: LightingSettings, settings?: SceneSettings) {
   signal.throwIfAborted();
   const mimeType = typeof MediaRecorder !== "undefined" && ["video/mp4;codecs=avc1.420028", "video/mp4"].find(type => MediaRecorder.isTypeSupported(type));
-  if (!mimeType) throw new Error("当前浏览器不支持 MP4 导出，请更新浏览器或桌面 WebView2 运行时");
+  if (!mimeType) throw new Error("当前浏览器不支持导出 MP4 视频，请更新浏览器；桌面版请更新 WebView2 运行时。");
   if (document.hidden) throw new Error("请在当前窗口保持可见时导出视频");
   const runtime = await createStage(document.createElement("canvas"), scene, undefined, aspect, lighting, settings);
   let player: ReturnType<typeof prepareSceneAnimation> | undefined;
@@ -60,7 +60,7 @@ export async function renderVideo(scene: SceneDocument, plan: DirectorPlan, aspe
         size += event.data.size;
         if (size > 100 * 1024 * 1024) stop(new Error("导出视频超过 100 MB，请缩短动画时长"));
       };
-      recorder!.onerror = () => stop(new Error("MP4 编码失败，请重试"));
+      recorder!.onerror = () => stop(new Error("MP4 编码失败，视频未能导出，请重试。"));
       recorder!.onstop = () => failure ? reject(failure) : resolve();
       signal.addEventListener("abort", cancel, { once: true });
       document.addEventListener("visibilitychange", checkVisibility);

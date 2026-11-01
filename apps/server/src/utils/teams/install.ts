@@ -2,13 +2,14 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFi
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import conf from "@/utils/conf";
-import { decodeText, requireNewerVersion, skillZip } from "@/utils/plugins/install";
+import { decodeText, recordInstalledAt, requireNewerVersion, skillZip } from "@/utils/plugins/install";
 import { isWithin } from "@/utils/workspace/files";
 import { agentsDirectory, checkName, fingerprint, installRecord, maxBytes, readFiles, validateFiles, withTeamFiles } from "./files";
+import { t } from "@/lib/i18n";
 
 const require = createRequire(import.meta.url);
 
-export async function installTeam(fileName: string, bytes: Uint8Array, force = false) {
+export async function installTeam(fileName: string, bytes: Uint8Array, force = false, marketVersion?: string) {
   if (!/^[a-z][a-zA-Z0-9]*\.agent\.zip$/.test(fileName) || fileName.length > 128) {
     throw Object.assign(new Error("请选择小驼峰命名的 .agent.zip 团队包"), { status: 400 });
   }
@@ -48,7 +49,7 @@ export async function installTeam(fileName: string, bytes: Uint8Array, force = f
         }
         let version: unknown;
         try { version = JSON.parse(decodeText(previous.files.get("team.json")!)).version; } catch { /* 版本缺失由共用升级检查提示。 */ }
-        requireNewerVersion(version, manifest.version, `团队“${name}”`);
+        requireNewerVersion(version, marketVersion ?? manifest.version, t`团队“${name}”`);
       }
       temporary = await mkdtemp(resolve(root, ".agentInstall"));
       const staged = resolve(temporary, "new");
@@ -67,7 +68,7 @@ export async function installTeam(fileName: string, bytes: Uint8Array, force = f
           try { await rename(backup, target); }
           catch (restoreError) {
             preserveBackup = true;
-            throw new AggregateError([error, restoreError], `团队更新失败，旧版保留在 ${backup}，请恢复后重试`);
+            throw new AggregateError([error, restoreError], t`团队更新失败，旧版保留在 ${backup}，请恢复后重试`);
           }
         }
         throw error;
@@ -76,6 +77,7 @@ export async function installTeam(fileName: string, bytes: Uint8Array, force = f
       for (const path of [...(previous?.files.keys() ?? []), ...files.keys()]) {
         if (path.startsWith("tools/")) delete require.cache[resolve(actualTarget, path)];
       }
+      recordInstalledAt("agent", name);
       return { name };
     } finally {
       if (temporary && !preserveBackup && temporary !== root && isWithin(root, temporary)) {

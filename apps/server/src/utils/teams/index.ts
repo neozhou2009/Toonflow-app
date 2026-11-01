@@ -40,20 +40,26 @@ export async function listTeams() {
       if (error.code === "ENOENT") return [];
       throw error;
     });
+    const installedTimes = conf.get("pluginInstalledAt", {});
     const local = [];
     for (const entry of entries.filter(entry => entry.isDirectory() && !entry.isSymbolicLink())) {
+      let installedAt = installedTimes[`agent:${entry.name}`] ?? 0;
       try {
+        if (!installedAt) {
+          const directory = await lstat(resolve(agentsDirectory, entry.name));
+          installedAt = directory.birthtimeMs || directory.mtimeMs;
+        }
         const { manifest, readme, enabled } = await readSnapshot(entry.name);
         const { name, displayName, description, version, author, github } = manifest;
-        local.push({ name, displayName, description, version, author, github, readme, enabled, loadError: "", kind: "local" as const });
+        local.push({ name, displayName, description, version, author, github, readme, enabled, installedAt, loadError: "", kind: "local" as const });
       } catch (error) {
-        local.push({ name: entry.name, displayName: entry.name, description: "", version: "", author: "", github: "", readme: "", enabled: false,
+        local.push({ name: entry.name, displayName: entry.name, description: "", version: "", author: "", github: "", readme: "", enabled: false, installedAt,
           loadError: translateMessage(error instanceof Error ? error.message : String(error)), kind: "local" as const });
       }
     }
     const remote = Object.values(conf.get("remoteConnections", {})).map(({ name, cardUrl, card, enabled }) => ({
       name, displayName: card.name, description: card.description, version: card.version, author: "", github: "", readme: "", enabled,
-      loadError: "", kind: "remote" as const, cardUrl,
+      installedAt: installedTimes[`agent:${name}`] ?? 0, loadError: "", kind: "remote" as const, cardUrl,
     }));
     return [...local, ...remote].sort((left, right) => left.name.localeCompare(right.name));
   });
@@ -70,7 +76,10 @@ export async function saveRemoteTeam(record: RemoteTeam) {
     if ([...locals, ...Object.keys(remotes)].some(name => name.toLowerCase() === record.name.toLowerCase())) {
       throw Object.assign(new Error("已存在同名团队或远端连接"), { status: 409 });
     }
-    conf.set("remoteConnections", { ...remotes, [record.name]: record });
+    conf.set({
+      remoteConnections: { ...remotes, [record.name]: record },
+      pluginInstalledAt: { ...conf.get("pluginInstalledAt", {}), [`agent:${record.name}`]: Date.now() },
+    });
   });
 }
 

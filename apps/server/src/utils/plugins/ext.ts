@@ -46,7 +46,7 @@ export async function readExt(name: string) {
   if (!file.isFile()) throw Object.assign(new Error("文件扩展必须是普通文件"), { status: 400 });
   if (file.size > 20 * 1024 * 1024) throw Object.assign(new Error("文件扩展不能超过 20 MB"), { status: 413 });
   const source = await readFile(path, "utf8");
-  return { ...parseExt(source, name), revision: Bun.hash(source).toString(16) };
+  return { ...parseExt(source, name), revision: Bun.hash(source).toString(16), installedAt: conf.get("pluginInstalledAt", {})[`ext:${name}`] ?? file.mtimeMs };
 }
 
 export function getExtConfig(extension: { name: string; configRules: z.infer<typeof configRulesSchema> }) {

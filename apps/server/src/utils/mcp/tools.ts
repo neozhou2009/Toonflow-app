@@ -1,6 +1,6 @@
 import { t } from "@/lib/i18n";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
-import { realpath, stat, mkdir, readdir, lstat, rm, rmdir, readFile } from "@toonflow/file";
+import { realpath, stat, mkdir, readdir, readFile } from "@toonflow/file";
 import { z } from "zod";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { CanvasContext } from "@toonflow/tools-scaffold/runtime";
@@ -11,7 +11,7 @@ import conf from "@/utils/conf";
 import { callControl, getConnection, listConnections } from "@/utils/mcp/control";
 import { appOperations, runAppOperation } from "@/utils/mcp/operations";
 import { listTools } from "@/utils/plugins/tools";
-import { isWithin, lockWorkspaceFiles, protectWorkspaceRoot, renameWorkspaceFile, resolveWorkspacePath, writeWorkspaceFile } from "@/utils/workspace/files";
+import { isWithin, lockWorkspaceFiles, protectWorkspaceRoot, renameWorkspaceFile, removeWorkspaceFile, resolveWorkspacePath, writeWorkspaceFile } from "@/utils/workspace/files";
 import { getRuntimePlatform } from "@/lib/platform";
 import { thinkingLevels } from "@/lib/modelReasoning";
 
@@ -177,8 +177,7 @@ export async function getMcpTools(): Promise<McpTool[]> {
         await writeWorkspaceFile(source.path, bytes, args.exclusive);
       } else if (args.action === "mkdir") await mkdir(source.path);
       else if (destination) await renameWorkspaceFile(source.path, destination.path);
-      else if ((await lstat(source.path)).isDirectory() && !args.recursive) await rmdir(source.path);
-      else await rm(source.path, { recursive: args.recursive });
+      else await removeWorkspaceFile(directory!, source.path, args.recursive);
     } finally { release(); }
     return { success: true };
   }));

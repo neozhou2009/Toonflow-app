@@ -55,7 +55,7 @@ export async function readTool(name: string, directory = toolsDirectory) {
   if (!file.isFile()) throw Object.assign(new Error("工具文件无效"), { status: 400 });
   if (file.size > 20 * 1024 * 1024) throw Object.assign(new Error("工具文件不能超过 20 MB"), { status: 400 });
   const source = await readFile(path, "utf8");
-  return { path, source, revision: createHash("sha256").update(source).digest("hex"), ...parseTool(source, name) };
+  return { path, source, revision: createHash("sha256").update(source).digest("hex"), ...parseTool(source, name), installedAt: conf.get("pluginInstalledAt", {})[`tool:${name}`] ?? file.mtimeMs };
 }
 
 export function getToolConfig(metadata: ToolMetadata): Record<string, unknown> {
@@ -77,11 +77,11 @@ export async function listTools() {
       const name = file.name.slice(0, -8);
       const enabled = !files.some(entry => entry.name === `${name}.disabled`);
       try {
-        const { metadata, revision } = await readTool(name);
-        return { ...metadata, enabled, config: getToolConfig(metadata), revision, loadError: "" };
+        const { metadata, revision, installedAt } = await readTool(name);
+        return { ...metadata, enabled, config: getToolConfig(metadata), revision, installedAt, loadError: "" };
       } catch (err) {
         const loadError = translateMessage(err instanceof Error ? err.message : "工具文件无法读取");
-        return { name, version: "", displayName: name, description: loadError, author: "", github: "", components: [], configRules: [], enabled, config: {}, revision: "", loadError };
+        return { name, version: "", displayName: name, description: loadError, author: "", github: "", components: [], configRules: [], enabled, config: {}, revision: "", installedAt: conf.get("pluginInstalledAt", {})[`tool:${name}`] ?? 0, loadError };
       }
     }));
 }

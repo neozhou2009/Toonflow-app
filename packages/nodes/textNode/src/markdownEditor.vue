@@ -1,15 +1,21 @@
 <template>
   <section class="nodeMarkdownEditor">
     <div class="editorToolbar" role="toolbar" aria-label="Markdown 编辑工具">
-      <button type="button" :disabled="locked || sourceMode || !ready" @mousedown.prevent @click="run('heading')">标题</button>
-      <button type="button" :disabled="locked || sourceMode || !ready" @mousedown.prevent @click="run('bold')">加粗</button>
-      <button type="button" :disabled="locked || sourceMode || !ready" @mousedown.prevent @click="run('italic')">斜体</button>
-      <button type="button" :disabled="locked || sourceMode || !ready" @mousedown.prevent @click="run('list')">列表</button>
-      <button type="button" :disabled="locked || sourceMode || !ready" @mousedown.prevent @click="run('undo')">撤销</button>
-      <button type="button" :disabled="locked || sourceMode || !ready" @mousedown.prevent @click="run('redo')">重做</button>
+      <div class="toolbarGroup">
+        <el-button class="toolButton" :class="{ active: editor?.isActive('heading') }" text :disabled="locked || sourceMode || !ready" title="标题" aria-label="标题" :aria-pressed="!!editor?.isActive('heading')" @mousedown.prevent @click="run('heading')"><icon-heading :size="17" /></el-button>
+        <el-button class="toolButton" :class="{ active: editor?.isActive('bold') }" text :disabled="locked || sourceMode || !ready" title="加粗" aria-label="加粗" :aria-pressed="!!editor?.isActive('bold')" @mousedown.prevent @click="run('bold')"><icon-bold :size="17" /></el-button>
+        <el-button class="toolButton" :class="{ active: editor?.isActive('italic') }" text :disabled="locked || sourceMode || !ready" title="斜体" aria-label="斜体" :aria-pressed="!!editor?.isActive('italic')" @mousedown.prevent @click="run('italic')"><icon-italic :size="17" /></el-button>
+        <el-button class="toolButton" :class="{ active: editor?.isActive('bulletList') }" text :disabled="locked || sourceMode || !ready" title="列表" aria-label="列表" :aria-pressed="!!editor?.isActive('bulletList')" @mousedown.prevent @click="run('list')"><icon-list :size="17" /></el-button>
+      </div>
+      <div class="toolbarGroup">
+        <el-button class="toolButton" text :disabled="locked || sourceMode || !editor?.can().undo()" title="撤销" aria-label="撤销" @mousedown.prevent @click="run('undo')"><icon-arrow-back-up :size="17" /></el-button>
+        <el-button class="toolButton" text :disabled="locked || sourceMode || !editor?.can().redo()" title="重做" aria-label="重做" @mousedown.prevent @click="run('redo')"><icon-arrow-forward-up :size="17" /></el-button>
+      </div>
       <span class="toolbarSpacer" />
-      <button type="button" @click="copyText">复制正文</button>
-      <button type="button" :aria-pressed="sourceMode" @click="sourceMode = !sourceMode">{{ sourceMode ? '富文本' : '原文' }}</button>
+      <div class="toolbarGroup">
+        <el-button class="toolButton" text title="复制正文" aria-label="复制正文" @click="copyText"><icon-copy :size="17" /></el-button>
+        <el-button class="toolButton" :class="{ active: sourceMode }" text :title="sourceMode ? '富文本' : '原文'" :aria-label="sourceMode ? '切换到富文本' : '切换到原文'" :aria-pressed="sourceMode" @click="sourceMode = !sourceMode"><component :is="sourceMode ? IconFileText : IconFileCode" :size="17" /></el-button>
+      </div>
     </div>
     <p v-if="error" class="editorError" role="alert">{{ error }}</p>
     <textarea v-if="sourceMode" class="sourceEditor" :value="modelValue" :readonly="readonly" :disabled="disabled" :aria-label="ariaLabel || '编辑 Markdown 原文'" spellcheck="false" @input="updateSource" />
@@ -21,6 +27,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { Editor, EditorContent } from "@tiptap/vue-3";
+import { ElButton } from "element-plus";
+import { IconHeading, IconBold, IconItalic, IconList, IconArrowBackUp, IconArrowForwardUp, IconCopy, IconFileCode, IconFileText } from "@tabler/icons-vue";
 import type { MarkdownProps } from "./markdownContent";
 import markdownExtensions, { parseMarkdownContent, serializeMarkdown } from "./markdownExtensions";
 
@@ -105,10 +113,12 @@ async function copyText() {
 <style scoped lang="scss">
 .nodeMarkdownEditor {
   display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; overflow: hidden;
-  .editorToolbar { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 0 8px; flex-shrink: 0;
-    button { border: 1px solid var(--el-border-color); border-radius: 4px; padding: 4px 8px; color: var(--el-text-color-primary); background: var(--el-bg-color); cursor: pointer;
-      &:hover { border-color: var(--el-color-primary); }
-      &:disabled { opacity: 0.45; cursor: default; }
+  .editorToolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 4px 0 8px; flex-shrink: 0;
+    .toolbarGroup { display: flex; align-items: center; gap: 2px;
+      + .toolbarGroup { margin-left: 4px; padding-left: 8px; border-left: 1px solid var(--el-border-color-lighter); }
+      .toolButton { width: 30px; height: 30px; margin-left: 0; padding: 0; border-radius: 6px;
+        &.active { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
+      }
     }
     .toolbarSpacer { flex: 1; }
   }

@@ -1,7 +1,8 @@
 import type { AgentMention } from "@toonflow/server/agent/types";
+import { translate } from "@toonflow/i18n/vue";
 
 export function mentionName(mention: AgentMention) {
-  return `${mention.source.kind === "asset" ? "全局素材" : mention.source.canvasName} / ${mention.label}`;
+  return `${mention.source.kind === "asset" ? translate("全局素材") : mention.source.canvasName} / ${mention.label}`;
 }
 
 export function mentionThumbnailProps(mention: AgentMention) {

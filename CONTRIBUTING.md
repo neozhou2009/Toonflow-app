@@ -33,7 +33,7 @@
 
 本仓库使用 Bun Workspaces，Web、业务 Server 和桌面端在同一个仓库中开发，无需另行克隆前端仓库。
 
-- 安装 Git 和根目录 `package.json` 中指定的 **Bun 1.3.14**，使用 `bun --version` 确认版本。
+- 安装 Git 和根目录 `package.json` 中指定的 **Bun 1.4.3**，使用 `bun --version` 确认版本。
 - 使用 Bun 安装依赖、运行脚本，不混用 npm、Yarn 或 pnpm 的安装流程。
 - 除特别说明外，下面的命令都在仓库根目录执行。桌面端另有平台要求，见下方说明。
 

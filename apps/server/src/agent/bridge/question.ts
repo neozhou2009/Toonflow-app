@@ -23,7 +23,7 @@ export function createQuestionContext(cwd: string, send: (event: Extract<AgentEv
           if (result instanceof Error) reject(result);
           else resolve(result);
         };
-        const abort = () => finish(new Error("提问已取消"));
+        const abort = () => finish(signal?.reason instanceof Error ? signal.reason : new Error("提问已取消"));
         pendingQuestions.set(callId, { cwd, request, finish, cancel() { onCancel?.(); abort(); } });
         activeQuestions.add(callId);
         signal?.addEventListener("abort", abort, { once: true });

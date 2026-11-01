@@ -54,9 +54,9 @@ await mkdir(payload, { recursive: true });
 
 const result = await Bun.build({
   // ACT: 服务端与 stdio 共用构建依赖，避免在 APK 中重复携带 MCP、Zod 和语言包。
-  entrypoints: [join(mobileRoot, "src/server.ts"), join(projectRoot, "packages/mcp/src/stdio.ts")],
+  entrypoints: [join(mobileRoot, "src/server.ts"), join(projectRoot, "packages/mcp/src/stdio.ts"), join(projectRoot, "packages/ffmpeg/src/ffmpegWorker.ts"), join(projectRoot, "packages/tools/sandbox/src/sandboxProcess.ts")],
   target: "bun", format: "esm", splitting: true, outdir: payload,
-  naming: "[name].js", minify: true, external: ["@silvia-odwyer/photon-node", "@firecrawl/anydoc", "@firecrawl/anydoc-wasm"],
+  naming: "[name].js", minify: true, external: ["@silvia-odwyer/photon-node", "@firecrawl/anydoc", "@firecrawl/anydoc-wasm", "just-bash"],
   define: { "process.env.appVersion": JSON.stringify(version) },
 });
 if (!result.success) throw new AggregateError(result.logs, "构建移动端服务失败");

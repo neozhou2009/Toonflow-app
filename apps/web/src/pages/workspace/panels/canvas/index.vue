@@ -2,7 +2,7 @@
   <div
     ref="canvasElement"
     class="canvas"
-    :class="{ edgesHidden: !showEdges, handMode, multiSelectionMode: flow.multiSelectionActive.value, compositingEnabled: generalSettings.canvasCompositingEnabled }"
+    :class="{ canvasUnselected: !canvasId, edgesHidden: !showEdges, handMode, multiSelectionMode: flow.multiSelectionActive.value, compositingEnabled: generalSettings.canvasCompositingEnabled }"
     :style="{ '--canvasEdgeColor': generalSettings.canvasEdgeColorMode === 'custom' ? generalSettings.canvasEdgeColor : 'var(--el-color-primary)' }"
     @dblclick="openNodeMenu"
     @wheel.capture="zoomCanvas"
@@ -62,15 +62,20 @@
           :error="nodeErrors[type]"
           :loading="nodeLoads.has(type) || (nodeListLoading && !nodeTypes[type] && !nodeErrors[type])" />
       </template>
-      <background :gap="16" pattern-color="var(--el-border-color)" />
+      <background v-if="canvasId" :gap="16" patternColor="var(--el-border-color)" />
+      <div v-if="!canvasId" class="canvasOverlay" role="status" @contextmenu.prevent @dragover.prevent @drop.prevent>
+        从左上角打开一个画布，就可以开始创作啦
+      </div>
       <canvasEmpty
         v-if="active && !settingsVisible && project?.directory && canvasReady && !flow.getNodes.value.length"
         :availableNodes="availableNodes"
         @create="createEmptyNode" />
+      <canvasViewportHint v-if="active && !settingsVisible && project?.directory && canvasReady" :key="canvasId" />
       <canvasMenu ref="canvasMenuRef" v-model:canvasId="canvasId" :directory="project?.directory" :initialCanvasId="initialCanvasId" :activateCanvas="activateCanvas" :flushSave="flushCanvases ?? flushCanvasSave">
         <assetLibrary ref="assetLibraryRef" v-model="assetsVisible" :directory="project?.directory" />
       </canvasMenu>
       <canvasControls
+        v-if="canvasId"
         ref="canvasControlsRef"
         v-model:assetsVisible="assetsVisible"
         v-model:snapEnabled="snapEnabled"
@@ -83,6 +88,7 @@
         :key="JSON.stringify(['nodeMenu', project?.directory, canvasId])"
         ref="nodeMenuRef"
         :remoteNodes="availableNodes"
+        :disabled="!active || settingsVisible || !project?.directory || !canvasReady"
         :pasteNode="pasteClipboardNode"
         :uploadFiles="canvasId && project?.directory ? selectFiles : undefined"
         :canUndo="canUndo"
@@ -101,6 +107,9 @@
         :disabled="!canvasId || !project?.directory" />
       <nodeSearch ref="nodeSearchRef" :disabled="!active || settingsVisible || !canvasId || !project?.directory" />
     </vue-flow>
+    <el-dialog :modelValue="!!assetSelection" class="referenceAssetDialog" title="全局素材库" width="min(1200px, 88vw)" alignCenter appendToBody destroyOnClose @update:modelValue="finishAssetSelection()">
+      <assetLibrary :modelValue="!!assetSelection" expanded :canSelect="canSelectAsset" :selecting="assetSelecting" @select="selectAsset" />
+    </el-dialog>
     <teleport to="body">
       <el-button
         v-if="edgeDisconnect && findEdge(edgeDisconnect.id)"
@@ -122,17 +131,19 @@
 </template>
 
 <script setup lang="ts">
+import { t, translate } from "@toonflow/i18n/vue";
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, onScopeDispose, provide, ref, shallowReactive, shallowRef, watch } from "vue";
 import axios from "axios";
 import { debounce } from "lodash-es";
 import { ElMessage } from "element-plus";
-import { isMobile, isDesktop } from "@/lib/platform";
+import { actualPlatform, isMobile } from "@/lib/platform";
 import { storeToRefs } from "pinia";
 import { IconUnlink } from "@tabler/icons-vue";
 import * as vueRuntime from "vue";
 import * as vueFlowRuntime from "@vue-flow/core";
 import * as elementPlusRuntime from "element-plus";
 import * as threeRuntime from "three";
+import * as modelIcons from "@toonflow/model-icons";
 import { runAgentLoop } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import "element-plus/dist/index.css";
@@ -142,12 +153,11 @@ import {
   ConnectionMode,
   SelectionMode,
   useVueFlow,
-  wheelDelta,
-  isMacOs,
   isNode,
   type Node,
   type Edge,
   type GraphEdge,
+  type GraphNode,
   type EdgeMouseEvent,
   type NodeTypesObject,
   type XYPosition,
@@ -158,19 +168,21 @@ import type { CanvasContext } from "@toonflow/tool-canvas/runtime";
 import { loadNodeComponent } from "./loadNodeComponent";
 import { useCanvasHistory } from "./useCanvasHistory";
 import { copyNodeToClipboard, copyNodesToClipboard, nodeClipboardCommand, readClipboardNodes } from "./nodeClipboard";
+import { remapNodeReferences } from "./canvasFiles";
 import { readClipboardFiles, readClipboardText, writeClipboardImage } from "@/lib/clipboard";
 import nodeMenu from "./components/nodeMenu.vue";
 import remoteNode from "./components/remoteNode.vue";
 import canvasMenu from "./components/canvasMenu.vue";
 import canvasControls from "./components/canvasControls.vue";
 import canvasEmpty from "./components/canvasEmpty.vue";
+import canvasViewportHint from "./components/canvasViewportHint.vue";
 import assetLibrary from "./components/assetLibrary.vue";
 import groupNode from "./components/groupNode.vue";
 import selectionToolbar from "./components/selectionToolbar.vue";
 import nodeSearch from "./components/nodeSearch.vue";
-import { finishGroupDrag, getSelectionTree } from "./selectionNodes";
+import { finishGroupDrag, fitGroupBounds, getSelectionTree } from "./selectionNodes";
 import type { NodeOutput } from "@toonflow/nodes-scaffold/values";
-import type { NodeConnectionFeedback, NodeHandle } from "@toonflow/nodes-scaffold/connection";
+import { validateConnection, type NodeConnectionFeedback, type NodeHandle } from "@toonflow/nodes-scaffold/connection";
 import { useNodeEvent } from "@toonflow/nodes-scaffold/nodeEvent";
 import type { NodeDocumentContext, NodeDocumentState } from "@toonflow/nodes-scaffold/nodeDocument";
 import { useNodeToolsContext } from "@toonflow/nodes-scaffold/nodeTools";
@@ -179,7 +191,7 @@ import { generalSettings } from "@/stores/settings";
 import { getShortcutBindings, shortcutLabel, shortcutMatches, shortcutPressed } from "@/lib/canvasShortcuts";
 import useWorkspaceFiles from "@/lib/workspaceFiles";
 import anonymousData from "@/lib/anonymousData";
-import { createClipboardMediaFile, dropCanvasFiles, getClipboardMediaFiles, importCanvasFiles, isCanvasFileDrag } from "./canvasDrop";
+import { createClipboardMediaFile, dropCanvasFiles, getCanvasFileType, getClipboardMediaFiles, importCanvasFiles, isCanvasFileDrag } from "./canvasDrop";
 import "@vue-flow/core/dist/style.css";
 import "@vue-flow/core/dist/theme-default.css";
 import "@vue-flow/minimap/dist/style.css";
@@ -276,6 +288,98 @@ provide("selectionConnection", shallowRef<NodeConnectionFeedback>());
 provide("saveNodeToAssets", (label: string, outputs: { label: string; output: NodeOutput }[]) => assetLibraryRef.value?.openSave(label, outputs));
 let canvasController = new AbortController();
 let workspaceController = new AbortController();
+type AssetReference = { source: string; sourceHandle: string };
+type AssetSelection = { target: GraphNode; targetHandleId: string; directory: string; sourceId: string; controller: AbortController; signal: AbortSignal; resolve: (reference?: AssetReference) => void };
+const assetSelection = shallowRef<AssetSelection>();
+const assetSelecting = ref(false);
+provide("selectNodeAsset", (targetId: string, targetHandleId: string) => {
+  finishAssetSelection();
+  const target = findNode(targetId);
+  const directory = project.value?.directory;
+  if (!target || !directory || !props.active || !canvasId.value) return Promise.resolve(undefined);
+  return new Promise<AssetReference | undefined>(resolve => {
+    const controller = new AbortController();
+    const signal = AbortSignal.any([controller.signal, canvasController.signal, workspaceController.signal]);
+    assetSelection.value = { target, targetHandleId, directory, sourceId: crypto.randomUUID(), controller, signal, resolve };
+    signal.addEventListener("abort", () => {
+      if (assetSelection.value?.signal === signal) finishAssetSelection();
+    }, { once: true });
+  });
+});
+function finishAssetSelection(reference?: AssetReference) {
+  const selection = assetSelection.value;
+  assetSelection.value = undefined;
+  assetSelecting.value = false;
+  selection?.controller.abort();
+  selection?.resolve(reference);
+}
+watch(() => assetSelection.value && (!props.active || props.settingsVisible || assetSelection.value.directory !== project.value?.directory
+  || findNode(assetSelection.value.target.id) !== assetSelection.value.target), invalid => {
+  if (invalid) finishAssetSelection();
+});
+onScopeDispose(() => finishAssetSelection());
+
+function assetConnection(type: string, selection: AssetSelection, source?: GraphNode) {
+  const target = selection.target;
+  if (selection.signal.aborted || findNode(target.id) !== target || !flow.nodesConnectable.value || target.connectable === false) return;
+  const sourceNode = source ?? { ...target, id: selection.sourceId, type, data: { handles: (nodeTypes.value[type] as { handles?: NodeHandle[] })?.handles }, connectable: true };
+  const nodes = source ? flow.getNodes.value : [...flow.getNodes.value, sourceNode];
+  return (sourceNode.data.handles as NodeHandle[] | undefined)?.filter(handle => handle.type === "source")
+    .map(handle => ({ source: sourceNode.id, sourceHandle: handle.id, target: target.id, targetHandle: selection.targetHandleId }))
+    .find(connection => sourceNode.connectable !== false && validateConnection(connection, { sourceNode, targetNode: target, nodes, edges: flow.getEdges.value }));
+}
+
+function canSelectAsset(entry: { name: string; type: string }) {
+  const selection = assetSelection.value;
+  const { type } = getCanvasFileType({ name: entry.name, type: "" });
+  return !!selection && entry.type === "file" && !!type && availableNodes.value.some(node => node.type === type) && !!assetConnection(type, selection);
+}
+
+async function selectAsset(entry: { name: string; path: string; type: string }) {
+  const selection = assetSelection.value;
+  if (!selection || assetSelecting.value || !canSelectAsset(entry)) return;
+  assetSelecting.value = true;
+  try {
+    const { data } = await axios.get<Blob>("/api/assets/read", { params: { path: entry.path }, responseType: "blob", signal: selection.signal });
+    selection.signal.throwIfAborted();
+    await canvasHistory.batch(async () => {
+      let importedId: string | undefined;
+      let created: GraphNode | undefined;
+      let connected = false;
+      const target = selection.target;
+      const position = { x: target.computedPosition.x - 440, y: target.computedPosition.y };
+      try {
+        [importedId] = await importCanvasFiles([new File([data], entry.name, { type: data.type })], position, {
+          directory: selection.directory, availableNodes: availableNodes.value, signal: selection.signal, flow,
+        });
+        if (!importedId) return;
+        created = findNode(importedId);
+        await nextTick();
+        if (!created || findNode(importedId) !== created) throw new Error("素材节点已移除，请重新选择");
+        await useNodeEvent(importedId, flow).emit("save");
+        selection.signal.throwIfAborted();
+        const connection = assetConnection(created.type ?? "", selection, created);
+        if (!connection) throw new Error("当前节点无法引用该素材");
+        const width = created.dimensions.width || 360;
+        created.position.x = target.computedPosition.x - width - 80;
+        addEdges(connection);
+        connected = true;
+        finishAssetSelection({ source: importedId, sourceHandle: connection.sourceHandle });
+      } finally {
+        if (importedId && !connected) {
+          if (created && findNode(importedId) === created) flow.removeNodes(importedId, true);
+          await useWorkspaceFiles(selection.directory).remove(`assets/${importedId}`, true).catch(cleanupError => {
+            if (cleanupError?.response?.data?.data?.code !== "ENOENT") ElMessage.error(cleanupError?.response?.data?.message || cleanupError.message);
+          });
+        }
+      }
+    });
+  } catch (error) {
+    if (!selection.signal.aborted) ElMessage.error(axios.isAxiosError<{ message: string }>(error) ? error.response?.data.message || error.message : (error as Error).message);
+  } finally {
+    if (assetSelection.value === selection) assetSelecting.value = false;
+  }
+}
 const createCanvasContext = useCanvasTools({
   availableNodes,
   flushSave: flushCanvasSave,
@@ -291,6 +395,29 @@ function getCanvasContext() {
 }
 const canvasReady = computed(() => !!canvasId.value && !nodeListLoading.value && nodeLoads.size === 0);
 provide("canvas", getCanvasContext);
+provide("nodePersistence", () => {
+  const directory = project.value?.directory;
+  const canvasPath = canvasId.value;
+  if (!directory || !canvasPath) return;
+  return {
+    directory,
+    canvasPath,
+    async save(signal?: AbortSignal) {
+      signal?.throwIfAborted();
+      if (project.value?.directory !== directory || canvasId.value !== canvasPath) throw new Error("画布已切换，无法保存节点任务");
+      let abort = () => {};
+      try {
+        const saving = flushCanvasSave();
+        await (signal ? Promise.race([saving, new Promise<never>((_resolve, reject) => {
+          abort = () => reject(signal.reason);
+          signal.addEventListener("abort", abort, { once: true });
+        })]) : saving);
+      } finally { signal?.removeEventListener("abort", abort); }
+      signal?.throwIfAborted();
+      if (project.value?.directory !== directory || canvasId.value !== canvasPath) throw new Error("画布已切换，无法确认节点任务保存结果");
+    },
+  };
+});
 defineExpose({ canvasId, canvasReady, getCanvasContext, addNodeAtPointer, readDocumentNode, saveDocumentNode, mountDocumentNode, observeDocumentNode, prepareCanvasDelete, flushSave: flushCanvasSave, cancelSave: cancelCanvasSave,
   openNodeSearch: () => nodeSearchRef.value?.open(),
   getCanvases: (signal?: AbortSignal) => {
@@ -509,7 +636,7 @@ function selectFiles(position: { x: number; y: number }) {
     const files = Array.from(input.files ?? []);
     if (!files.length || context.signal.aborted) return;
     try {
-      await canvasHistory.batch(() => importCanvasFiles(files, position, context));
+      await canvasHistory.batch(async () => { await importCanvasFiles(files, position, context); });
     } catch (error) {
       ElMessage.error(error instanceof Error ? error.message : "文件导入失败");
     }
@@ -644,10 +771,42 @@ watch(
             { flush: "post" }
           )
         : () => {};
+      let stopDimensions = () => {};
+      if (isNode(element)) {
+        const parents = computed(() => {
+          const result: GraphNode[] = [];
+          const visited = new Set([element.id]);
+          let parent = findNode(element.parentNode);
+          while (parent && !visited.has(parent.id)) {
+            visited.add(parent.id);
+            result.push(parent);
+            parent = findNode(parent.parentNode);
+          }
+          return result;
+        });
+        let dimensionsChanged = false;
+        stopDimensions = watch(
+          [
+            () => element.dimensions.width,
+            () => element.dimensions.height,
+            () => [element, ...parents.value].some(node => node.dragging || node.resizing),
+          ],
+          ([width, height, interacting], [previousWidth, previousHeight]) => {
+            dimensionsChanged ||= width !== previousWidth || height !== previousHeight;
+            if (!dimensionsChanged || interacting) return;
+            dimensionsChanged = false;
+            // ACT: 尺寸变化延后到拖动、缩放结束贴合，只调整祖先分组，不改变节点归属。
+            const groups = new Set(parents.value.filter(node => node.type === "canvasGroup"));
+            if (groups.size) fitGroupBounds(flow.getNodes.value, groups);
+          },
+          { flush: "post" },
+        );
+      }
       elementSaveWatchers.set(element, () => {
         stopFields();
         stopData();
         stopName();
+        stopDimensions();
       });
     }
     scheduleCanvasChange();
@@ -819,7 +978,7 @@ async function pasteNode(event: ClipboardEvent) {
   let files = getClipboardMediaFiles(event);
   if (files.length || text.trim()) event.preventDefault();
   // ACT: 部分 WebView 不向 paste 事件暴露剪贴板文件，桌面端回退到原生剪贴板读取。
-  if (!files.length && isDesktop) files = await readClipboardFiles().catch(() => []);
+  if (!files.length && actualPlatform.isDesktop) files = await readClipboardFiles().catch(() => []);
   if (canvasSignal.aborted) return;
   if (!files.length && text.trim()) files = [new File([text], "粘贴文本.txt", { type: "text/plain" })];
   if (!files.length) return;
@@ -847,7 +1006,7 @@ async function importCanvasContent(files: File[], position: { x: number; y: numb
   if (!directory) return false;
   const canvasSignal = canvasController.signal;
   try {
-    await canvasHistory.batch(() => importCanvasFiles(files, position, { directory, availableNodes: availableNodes.value, signal: canvasSignal, flow }));
+    await canvasHistory.batch(async () => { await importCanvasFiles(files, position, { directory, availableNodes: availableNodes.value, signal: canvasSignal, flow }); });
     return true;
   } catch (error) {
     if (!canvasSignal.aborted) ElMessage.error(error instanceof Error ? error.message : "剪贴板内容导入失败");
@@ -868,6 +1027,7 @@ async function pasteClipboardNode(position: { x: number; y: number }, command?: 
         throw new Error("请先安装并启用对应的节点插件");
       }
       const ids = new Map(snapshot.nodes.map(node => [node.id, crypto.randomUUID()]));
+      for (const node of snapshot.nodes) remapNodeReferences(node, ids);
       const roots = snapshot.nodes.filter(node => !node.parentNode);
       const left = Math.min(...roots.map(node => node.position.x));
       const top = Math.min(...roots.map(node => node.position.y));
@@ -892,8 +1052,8 @@ async function pasteClipboardNode(position: { x: number; y: number }, command?: 
   } catch (error) {
     const pasteShortcut = generalSettings.value.canvasShortcuts.paste;
     const clipboardMessage = getShortcutBindings(pasteShortcut).some(binding => /^(Ctrl|Meta)\+KeyV$/.test(binding))
-      ? `无法读取剪贴板，请在画布上按 ${shortcutLabel(pasteShortcut)} 粘贴`
-      : "无法读取剪贴板，请允许浏览器访问剪贴板";
+      ? t`无法读取剪贴板，请在画布上按 ${shortcutLabel(pasteShortcut)} 粘贴`
+      : translate("无法读取剪贴板，请允许浏览器访问剪贴板");
     if (!canvasSignal.aborted)
       ElMessage.error(
         error instanceof DOMException && error.name === "NotAllowedError" ? clipboardMessage : error instanceof Error ? error.message : "剪贴板内容粘贴失败"
@@ -926,8 +1086,8 @@ function zoomCanvas(event: WheelEvent | (Event & { scale: number })) {
     } else if (pinching) {
       factor = 2 ** (-event.deltaY * 0.02);
     } else {
-      // ACT: @vue-flow/core 的 wheelDelta 在 macOS 下若检测到 event.ctrlKey 会额外乘以 10（误判为捏合微步）；非捏合的实体 Ctrl 滚轮缩放需剔除该倍数，保留标准滚轮速度。
-      const delta = wheelDelta(event) / (event.ctrlKey && isMacOs() ? 10 : 1);
+      // ACT: 捏合已单独处理；实体滚轮只按 deltaMode 换算，避免 Vue Flow 基于 UA 的额外倍率。
+      const delta = -event.deltaY * (event.deltaMode === 1 ? 0.05 : event.deltaMode ? 1 : 0.002);
       factor = 2 ** delta;
     }
     point = { x: event.clientX, y: event.clientY };
@@ -992,7 +1152,7 @@ function updateCanvasKeys(event: KeyboardEvent) {
   if (!canvasId.value || !project.value?.directory) return;
   if (action === "copy" && (!flow.getSelectedNodes.value.length || window.getSelection()?.toString())) return;
   // 桌面快捷键直接复用原生剪贴板桥接；浏览器 Ctrl/Cmd+V 保留原生事件，避免额外读取权限。
-  if (!isDesktop && action === "paste" && event.code === "KeyV" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) return;
+  if (!actualPlatform.isDesktop && action === "paste" && event.code === "KeyV" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) return;
   event.preventDefault();
   if (event.repeat) return;
   if (action === "delete") {
@@ -1066,10 +1226,10 @@ onBeforeUnmount(() => {
 });
 
 const nodeWindow = window as typeof window & {
-  toonflowNodeHost?: { vue: typeof vueRuntime; vueFlow: typeof vueFlowRuntime; elementPlus: typeof elementPlusRuntime; three: typeof threeRuntime; ai: { runAgentLoop: typeof runAgentLoop; createAssistantMessageEventStream: typeof createAssistantMessageEventStream } };
+  toonflowNodeHost?: { vue: typeof vueRuntime; vueFlow: typeof vueFlowRuntime; elementPlus: typeof elementPlusRuntime; three: typeof threeRuntime; modelIcons: typeof modelIcons; ai: { runAgentLoop: typeof runAgentLoop; createAssistantMessageEventStream: typeof createAssistantMessageEventStream } };
   toonflowNodes?: NodeTypesObject;
 };
-nodeWindow.toonflowNodeHost = { vue: vueRuntime, vueFlow: vueFlowRuntime, elementPlus: elementPlusRuntime, three: threeRuntime, ai: { runAgentLoop, createAssistantMessageEventStream } };
+nodeWindow.toonflowNodeHost = { vue: vueRuntime, vueFlow: vueFlowRuntime, elementPlus: elementPlusRuntime, three: threeRuntime, modelIcons, ai: { runAgentLoop, createAssistantMessageEventStream } };
 provide("nodeConfig", (nodeType: string) => nodeConfigs.value[nodeType] ?? {});
 provide("workspaceFiles", () => {
   const directory = project.value?.directory;
@@ -1191,9 +1351,44 @@ const defaultEdgeOptions = markRaw({
 </script>
 
 <style lang="scss" scoped>
+:global(.referenceAssetDialog) {
+  display: flex;
+  flex-direction: column;
+  height: 80dvh;
+  max-height: calc(100dvh - 32px);
+  overflow: hidden;
+}
+
+:global(.referenceAssetDialog .el-dialog__body) {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .canvas {
   width: 100%;
   height: 100%;
+
+  &.canvasUnselected :deep(.vue-flow__viewport) {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .canvasOverlay {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: var(--el-bg-color);
+    color: var(--el-text-color-secondary);
+    font-size: 14px;
+    line-height: 1.6;
+    text-align: center;
+    cursor: default;
+  }
 
   &.compositingEnabled :deep(.vue-flow__transformationpane) {
     will-change: transform;

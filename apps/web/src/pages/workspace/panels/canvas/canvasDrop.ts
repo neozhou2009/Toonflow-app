@@ -4,13 +4,11 @@ import type { useVueFlow } from "@vue-flow/core";
 import { uploadNodeFile } from "@toonflow/nodes-scaffold/workspaceFiles";
 import type { NodeOutput } from "@toonflow/nodes-scaffold/values";
 import useWorkspaceFiles from "@/lib/workspaceFiles";
+import { getMediaMimeType, mediaMimeTypes } from "@toonflow/node-shared/mediaTypes";
 
 const assetDragType = "application/toonflow-asset";
 const fileMimeTypes: Record<string, string> = {
-  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif",
-  avif: "image/avif", apng: "image/apng", bmp: "image/bmp", svg: "image/svg+xml", ico: "image/x-icon",
-  mp4: "video/mp4", m4v: "video/mp4", webm: "video/webm", mov: "video/quicktime", mkv: "video/x-matroska", avi: "video/x-msvideo",
-  mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", opus: "audio/ogg", flac: "audio/flac", m4a: "audio/mp4", aac: "audio/aac",
+  ...mediaMimeTypes,
   txt: "text/plain", md: "text/markdown", markdown: "text/markdown", csv: "text/csv", log: "text/plain",
   json: "application/json", xml: "application/xml", html: "text/html", css: "text/css", js: "text/javascript", ndjson: "application/x-ndjson",
 };
@@ -27,6 +25,15 @@ function inferredMediaType(file: File) {
   if (/^(image|audio|video)\//.test(type)) return type;
   const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
   return fileMimeTypes[extension] ?? "";
+}
+
+export function getCanvasFileType(file: Pick<File, "name" | "type">) {
+  const fileType = getMediaMimeType(file);
+  const extension = file.name.split(".").pop()!.toLowerCase();
+  const mimeType = !fileType || fileType === "application/octet-stream" ? fileMimeTypes[extension] ?? fileType : fileType;
+  const kind = mimeType.startsWith("image/") ? "image" : mimeType.startsWith("audio/") ? "audio" : mimeType.startsWith("video/") ? "video"
+    : mimeType.startsWith("text/") || /^application\/(json|xml|javascript|x-ndjson)$/.test(mimeType) ? "text" : undefined;
+  return { mimeType, kind, type: kind ? `remote-${kind}Node` : undefined };
 }
 
 function clipboardMediaName(type: string, index: number) {
@@ -92,18 +99,14 @@ export async function dropCanvasFiles(event: DragEvent, context: CanvasFileConte
 export async function importCanvasFiles(droppedFiles: File[], position: { x: number; y: number }, context: CanvasFileContext) {
   const { signal, flow, availableNodes } = context;
   const files = useWorkspaceFiles(context.directory);
+  const importedIds: string[] = [];
   for (const [index, file] of droppedFiles.entries()) {
     if (signal.aborted) break;
     const id = crypto.randomUUID();
     let copiedPath: string | undefined;
     try {
-      const fileType = file.type.split(";")[0]!.trim().toLowerCase();
-      const extension = file.name.split(".").pop()!.toLowerCase();
-      const mimeType = !fileType || fileType === "application/octet-stream" ? fileMimeTypes[extension] ?? fileType : fileType;
-      const kind = mimeType.startsWith("image/") ? "image" : mimeType.startsWith("audio/") ? "audio" : mimeType.startsWith("video/") ? "video"
-        : mimeType.startsWith("text/") || /^application\/(json|xml|javascript|x-ndjson)$/.test(mimeType) ? "text" : undefined;
-      if (!kind) throw new Error(`${file.name}：该文件类型暂不支持导入画布`);
-      const type = `remote-${kind}Node`;
+      const { mimeType, kind, type } = getCanvasFileType(file);
+      if (!kind || !type) throw new Error(`${file.name}：该文件类型暂不支持导入画布`);
       if (!availableNodes.some(node => node.type === type)) throw new Error(`${file.name}：请先安装并启用对应的基础节点`);
       let output: NodeOutput | undefined;
       let textSnapshot: string | undefined;
@@ -116,11 +119,13 @@ export async function importCanvasFiles(droppedFiles: File[], position: { x: num
       signal.throwIfAborted();
       flow.addNodes({ id, type, position: { x: position.x + index * 32, y: position.y + index * 32 },
         data: kind === "text" ? { label: file.name, textSnapshot } : { label: file.name, outputs: { [kind]: output } } });
+      importedIds.push(id);
     } catch (error) {
       if (copiedPath) await files.remove(copiedPath).catch(showError);
       if (!signal.aborted) showError(error);
     }
   }
+  return importedIds;
 }
 
 function showError(error: unknown) {

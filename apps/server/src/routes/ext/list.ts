@@ -15,7 +15,7 @@ export default Router().get("/", async (req, res) => {
       const name = file.name.slice(0, -7);
       const metadata = await u.extPlugins.readExt(name).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return null;
-        return { name, id: name, displayName: name, extensions: [], resourceKind: "file", version: "", readme: "", author: "", github: "", configRules: [],
+        return { name, id: name, displayName: name, extensions: [], resourceKind: "file", version: "", readme: "", author: "", github: "", configRules: [], installedAt: u.conf.get("pluginInstalledAt", {})[`ext:${name}`] ?? 0,
           loadError: translateMessage(error instanceof Error ? error.message : "文件扩展无法读取") };
       });
       return metadata && { loadError: "", ...metadata, canManage, canConfigure: canManage, config: canManage ? u.extPlugins.getExtConfig(metadata) : {},

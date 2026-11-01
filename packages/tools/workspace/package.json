@@ -8,6 +8,7 @@
     "typecheck": "tsc"
   },
   "dependencies": {
+    "re2js": "2.8.6",
     "zod": "^4.6.2"
   },
   "devDependencies": {

@@ -206,7 +206,10 @@ export async function run(options: {
     }));
     const { runtime, effectiveThinkingLevel } = await createAgentModel(options.providerId, options.modelId, options.thinkingLevel);
     active.controller.signal.throwIfAborted();
-    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+    const settingsManager = SettingsManager.inMemory({
+      compaction: { enabled: false },
+      retry: { enabled: true, maxRetries: 3, baseDelayMs: 2000, provider: { maxRetries: 0 } },
+    });
     const agentDir = join(state.cwd, ".agent");
     const systemPrompt = [...new Set([state.systemPrompt || "请根据用户要求完成当前任务，按需使用提供的工具。", ...tools.flatMap(tool => tool.promptGuidelines ?? [])])].filter(Boolean).join("\n\n");
     const resourceLoader = new DefaultResourceLoader({
@@ -221,7 +224,8 @@ export async function run(options: {
       thinkingLevel: effectiveThinkingLevel, sessionManager: state.history, settingsManager, resourceLoader,
       tools: tools.map(tool => tool.name), customTools: tools,
     });
-    configureAgentRequests(session);
+    let messageIndex = 0;
+    configureAgentRequests(session, undefined, active.controller.signal, replyTo => send({ type: "retry", blockPrefix: `${messageIndex}:`, replyTo }));
     active.session = session;
     active.controller.signal.throwIfAborted();
     const streamFunction = session.agent.streamFunction;
@@ -234,7 +238,6 @@ export async function run(options: {
         return stream;
       } catch (error) { finishAction(active); throw error; }
     };
-    let messageIndex = 0;
     const toolBlocks = new Map<string, string>();
     session.subscribe(event => {
       if (event.type === "message_start" && event.message.role === "assistant") messageIndex++;
@@ -254,14 +257,17 @@ export async function run(options: {
           }
         }
       }
-      if (event.type === "message_end" && event.message.role === "assistant") event.message.content.forEach((part, index) => {
-        const blockId = `${messageIndex}:${index}`;
-        if (part.type === "text" || part.type === "thinking") send({ type: part.type, blockId, content: part.type === "text" ? part.text : part.thinking, done: true });
-        if (part.type === "toolCall") {
-          toolBlocks.set(part.id, blockId);
-          send({ type: "tool", blockId, tool: { id: part.id, name: part.name, args: part.arguments, status: "running" } });
-        }
-      });
+      if (event.type === "message_end" && event.message.role === "assistant") {
+        const toolStatus = event.message.stopReason === "error" || event.message.stopReason === "aborted" ? "interrupted" : "running";
+        event.message.content.forEach((part, index) => {
+          const blockId = `${messageIndex}:${index}`;
+          if (part.type === "text" || part.type === "thinking") send({ type: part.type, blockId, content: part.type === "text" ? part.text : part.thinking, done: true });
+          if (part.type === "toolCall") {
+            toolBlocks.set(part.id, blockId);
+            send({ type: "tool", blockId, tool: { id: part.id, name: part.name, args: part.arguments, status: toolStatus } });
+          }
+        });
+      }
       if (event.type === "tool_execution_start" || event.type === "tool_execution_end" || event.type === "tool_execution_update") {
         const result = event.type === "tool_execution_end" ? event.result : event.type === "tool_execution_update" ? event.partialResult : undefined;
         send({ type: "tool", blockId: toolBlocks.get(event.toolCallId) ?? event.toolCallId, tool: {

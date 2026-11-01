@@ -8,6 +8,45 @@ type CanvasFile = { toonflowCanvas: true; nodes: Node[]; edges: Edge[]; viewport
 export type DocumentNode = { canvasPath: string; nodeId: string; label: string; nodeType?: string; parentNode?: string };
 export type DocumentNodeOptions = { canvasPath?: string; includeGroups?: boolean; signal?: AbortSignal; onError?: (path: string, error: unknown) => void };
 
+export function remapNodeReferences(node: Pick<Node, "data">, ids: ReadonlyMap<string, string>) {
+  // 复制产生新节点，不能继承原节点的供应商任务身份。
+  if (node.data) delete node.data.mediaTask;
+  const remapReference = (value: string) => {
+    try {
+      const reference = JSON.parse(decodeURIComponent(value));
+      if (Array.isArray(reference) && reference.length === 2 && ids.has(reference[0])) return encodeURIComponent(JSON.stringify([ids.get(reference[0]), reference[1]]));
+    } catch { /* 普通文本不是节点参考标识。 */ }
+    return value;
+  };
+  if (node.data?.referenceOrder && typeof node.data.referenceOrder === "object") {
+    for (const [handle, order] of Object.entries(node.data.referenceOrder)) {
+      if (Array.isArray(order)) node.data.referenceOrder[handle] = order.map(value => typeof value === "string" ? remapReference(value) : value);
+    }
+  }
+  if (Array.isArray(node.data?.promptModel)) for (const line of node.data.promptModel) {
+    if (!Array.isArray(line)) continue;
+    for (const tag of line) if (tag?.type === "Custom" && typeof tag.html === "string") {
+      tag.html = tag.html.replace(/(data-reference-id=["'])([^"']+)(["'])/g, (_match: string, before: string, value: string, after: string) => before + remapReference(value) + after);
+    }
+  }
+}
+
+export async function findRemainingCanvas(files: Files, excludedPath: string, signal?: AbortSignal) {
+  const folders = [""];
+  for (const folder of folders) {
+    const { entries } = await files.list(folder, signal);
+    for (const entry of entries) {
+      signal?.throwIfAborted();
+      if (entry.path === excludedPath || entry.path.startsWith(`${excludedPath}/`)) continue;
+      if (entry.type === "directory") {
+        if (!["assets", ".agent"].includes(entry.name.toLowerCase())) folders.push(entry.path);
+      } else if (/\.json$/i.test(entry.name) && await isCanvasFile(files, entry.path, signal)) {
+        return { id: entry.path, name: entry.name.slice(0, -5) };
+      }
+    }
+  }
+}
+
 export async function readCanvasFiles(files: Files, path = "", options: Omit<DocumentNodeOptions, "canvasPath"> = {}) {
   const { signal, onError } = options;
   signal?.throwIfAborted();
@@ -72,13 +111,6 @@ export async function copyCanvasFiles(files: Files, path: string, target: string
         for (const [source, destination] of paths) if (normalized === source || normalized.startsWith(`${source}/`)) return destination + normalized.slice(source.length);
         return value;
       };
-      const remapReference = (value: string) => {
-        try {
-          const reference = JSON.parse(decodeURIComponent(value));
-          if (Array.isArray(reference) && reference.length === 2 && ids.has(reference[0])) return encodeURIComponent(JSON.stringify([ids.get(reference[0]), reference[1]]));
-        } catch { /* 普通文本不是节点参考标识。 */ }
-        return value;
-      };
       const remapData = (value: unknown): unknown => {
         if (typeof value === "string") return remapPath(value);
         if (Array.isArray(value)) return value.map(remapData);
@@ -111,17 +143,7 @@ export async function copyCanvasFiles(files: Files, path: string, target: string
           }
           node.data.textPath = destination;
         }
-        if (node.data?.referenceOrder && typeof node.data.referenceOrder === "object") {
-          for (const [handle, order] of Object.entries(node.data.referenceOrder)) {
-            if (Array.isArray(order)) node.data.referenceOrder[handle] = order.map(value => typeof value === "string" ? remapReference(value) : value);
-          }
-        }
-        if (Array.isArray(node.data?.promptModel)) for (const line of node.data.promptModel) {
-          if (!Array.isArray(line)) continue;
-          for (const tag of line) if (tag?.type === "Custom" && typeof tag.html === "string") {
-            tag.html = tag.html.replace(/(data-reference-id=["'])([^"']+)(["'])/g, (_match: string, before: string, value: string, after: string) => before + remapReference(value) + after);
-          }
-        }
+        remapNodeReferences(node, ids);
       }
       for (const edge of canvas.data.edges) Object.assign(edge, { id: crypto.randomUUID(), source: ids.get(edge.source)!, target: ids.get(edge.target)!, selected: false });
       const suffix = canvas.id.slice(path.length);
