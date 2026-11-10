@@ -135,6 +135,8 @@ interface ImageRequest extends MediaRequest {
 
 interface VideoRequest extends MediaRequest {
   prompt: string;
+  /** referenceOrder[0] 对应 {{ref 1}}；媒体 index 是对应分类数组的零基下标。供应商按需转换标记，不使用时可忽略。 */
+  referenceOrder?: ({ type: "image" | "video" | "audio"; index: number } | { type: "firstFrame" | "lastFrame" | "text" })[];
   /** 当前生成模式；参考模式数组声明各类参考媒体数量上限。 */
   mode?: VideoMode;
   /** 参考图；首尾帧通过 firstFrame、lastFrame 单独传入。 */
