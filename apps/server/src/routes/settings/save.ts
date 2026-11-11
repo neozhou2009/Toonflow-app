@@ -20,6 +20,7 @@ export default router.put("/", validateFields({ settings: z.record(z.string(), z
   toonflowProvider: accountProviderSchema.nullable().optional(),
   network: u.network.networkSchema.optional(),
   desktopAutoUpdate: z.boolean().optional(),
+  detailedErrorLogs: z.boolean().optional(),
   desktopUpdateSource: z.enum(["official", "github", "custom"]).optional(),
   desktopUpdateCustomUrl: z.string().max(2048).refine(value => !value || u.desktop.isValidUpdateUrl(value),
     "自定义更新源必须是不含账号、查询参数或锚点的 HTTP(S) 地址").optional(),

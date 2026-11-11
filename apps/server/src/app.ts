@@ -137,8 +137,11 @@ export async function createApp({
     if (response.headersSent) return next(err);
     const expectedError = request.method === "GET" && ["/api/workspaces/files/read", "/api/workspaces/files/list"].includes(request.path) && err.code === "ENOENT"
       || request.method === "POST" && request.path === "/api/ai/media/balance";
-    if (!expectedError) console.error(err);
     const body = errorFromCause(err);
+    if (!expectedError) {
+      if (conf.get("settings.detailedErrorLogs") === true) console.error(err);
+      else console.error(`[ERROR] ${new Date().toISOString()} ${body.code} ${request.method} ${request.path} ${body.message}`.replace(/[\r\n]+/g, " ").slice(0, 1500));
+    }
     response.status(body.code).json(body);
   });
 

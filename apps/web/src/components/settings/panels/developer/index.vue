@@ -8,6 +8,13 @@
         </div>
         <el-button type="primary" :icon="IconTerminal2" :loading="opening" :disabled="!actualPlatform.isDesktop" @click="openDevTools">打开 DevTools</el-button>
       </div>
+      <div class="developerRow">
+        <div class="toolDescription">
+          <h3>详细错误日志</h3>
+          <p>默认关闭，服务端请求错误仅输出简短摘要。开启后输出完整异常与调用堆栈，保存后立即生效。</p>
+        </div>
+        <el-switch :modelValue="settings.detailedErrorLogs === true" :loading="savingErrorLogs" aria-label="详细错误日志" @change="saveErrorLogs" />
+      </div>
       <el-text v-if="!actualPlatform.isDesktop" type="info">浏览器模式请从浏览器菜单打开开发者工具。</el-text>
       <el-text v-if="requestError" type="danger" role="alert">{{ requestError }}</el-text>
       <div class="developerRow">
@@ -165,6 +172,19 @@ const developerLocked = computed(() => !developerStore.developerConfirmed);
 const customUpdateUrl = ref(typeof settings.value.desktopUpdateCustomUrl === "string" ? settings.value.desktopUpdateCustomUrl : "");
 const savingUpdateUrl = ref(false);
 const updateUrlError = ref("");
+const savingErrorLogs = ref(false);
+
+async function saveErrorLogs(value: string | number | boolean) {
+  if (savingErrorLogs.value) return;
+  savingErrorLogs.value = true;
+  try {
+    await saveSettings(() => ({ detailedErrorLogs: value === true }));
+  } catch (error) {
+    ElMessage.error(axios.isAxiosError<{ message?: string }>(error) ? error.response?.data?.message || error.message : error instanceof Error ? error.message : "保存设置失败");
+  } finally {
+    savingErrorLogs.value = false;
+  }
+}
 
 async function openUpdateBox() {
   if (openingUpdateBox.value) return;
